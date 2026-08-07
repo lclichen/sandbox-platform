@@ -41,9 +41,11 @@ export interface ContainerRow {
   last_stopped_at: string | null;
 }
 
-export interface ContainerPublic extends Omit<ContainerRow, "env" | "instance_name" | "overlay_path" | "node"> {
+export interface ContainerPublic extends Omit<ContainerRow, "instance_name" | "overlay_path" | "node"> {
   instance_name: string | null;
   node: string | null;
+  /** Decoded env overrides (hidden from the row type; toPublic decodes JSON). */
+  env: Record<string, string> | null;
 }
 
 function toPublic(row: ContainerRow, dialect: string): ContainerPublic {
@@ -69,11 +71,11 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
 
   return {
     async getById(id: number): Promise<ContainerRow | null> {
-      const raw = await db.get<Omit<ContainerRow, "env"> & Record<string, unknown>>(
+      const raw = await db.get<Record<string, unknown>>(
         "SELECT * FROM containers WHERE id = ?",
         id,
       );
-      return raw ? (raw as ContainerRow) : null;
+      return raw ? (raw as unknown as ContainerRow) : null;
     },
 
     async requireById(id: number): Promise<ContainerRow> {
@@ -128,7 +130,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
         request.cpu,
         request.memory_mb,
         request.disk_gb,
-        encodeJson(input.env ?? null, db.dialect),
+        encodeJson(input.env ?? null, db.dialect) as SqlValue,
       );
       const containerId = Number(result.lastInsertRowid);
 

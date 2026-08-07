@@ -95,4 +95,41 @@ describe("MockExecutor lifecycle", () => {
     expect(res.timedOut).toBe(true);
     await exec.destroy(handle);
   }, 10000);
+
+  it("rejects path traversal that escapes the sandbox root", async () => {
+    const exec = new MockExecutor(base);
+    const handle = await exec.create({ id: "sb-escape", imagePath: "/x", cpu: 1, memoryMb: 256, diskGb: 1 });
+
+    const traversal = process.platform === "win32" ? "..\\..\\..\\..\\windows\\win.ini" : "../../../../etc/passwd";
+    // read
+    await expect(exec.readFile(handle, traversal)).rejects.toThrow(/escapes the sandbox root/);
+    // write
+    await expect(exec.writeFile(handle, traversal, Buffer.from("pwn"))).rejects.toThrow(/escapes the sandbox root/);
+    // access / stat / readdir
+    await expect(exec.access(handle, traversal)).rejects.toThrow(/escapes the sandbox root/);
+    await expect(exec.stat(handle, traversal)).rejects.toThrow(/escapes the sandbox root/);
+    await expect(exec.readdir(handle, traversal)).rejects.toThrow(/escapes the sandbox root/);
+    // exec cwd (both absolute escape and relative traversal)
+    await expect(exec.exec(handle, "echo hi", { cwd: traversal })).rejects.toThrow(/escapes the sandbox root/);
+    await expect(exec.exec(handle, "echo hi", { cwd: "sub/../../.." })).rejects.toThrow(/escapes the sandbox root/);
+    // NUL bytes are rejected outright
+    await expect(exec.readFile(handle, "a\0b")).rejects.toThrow(/Invalid container path/);
+
+    await exec.destroy(handle);
+  });
+
+  it("still allows nested paths and root-contained traversal", async () => {
+    const exec = new MockExecutor(base);
+    const handle = await exec.create({ id: "sb-nested", imagePath: "/x", cpu: 1, memoryMb: 256, diskGb: 1 });
+    // Nested subdirs with relative traversal that stays inside the root.
+    await exec.writeFile(handle, "sub/dir/f.txt", Buffer.from("data", "utf8"));
+    const data = await exec.readFile(handle, "sub/./dir/f.txt");
+    expect(data.toString("utf8")).toBe("data");
+    const viaUp = await exec.readFile(handle, "sub/dir/../dir/f.txt");
+    expect(viaUp.toString("utf8")).toBe("data");
+    // Root itself is a valid target.
+    const rootListing = await exec.readdir(handle, ".");
+    expect(rootListing).toContain("sub");
+    await exec.destroy(handle);
+  });
 });

@@ -123,8 +123,8 @@ class SqliteDatabase implements Database {
       dialect: this.dialect,
       exec: (sql) => this.exec(sql),
       run: (sql, ...p) => this.run(sql, ...p),
-      all: (sql, ...p) => this.all(sql, ...p),
-      get: (sql, ...p) => this.get(sql, ...p),
+      all: <T = Record<string, unknown>>(sql: string, ...p: SqlValue[]) => this.all<T>(sql, ...p),
+      get: <T = Record<string, unknown>>(sql: string, ...p: SqlValue[]) => this.get<T>(sql, ...p),
     };
     try {
       const result = await fn(txImpl);
@@ -146,7 +146,7 @@ class SqliteDatabase implements Database {
 }
 
 /** node:sqlite only accepts a subset of JS values; coerce our SqlValue union. */
-function toSqliteParams(params: SqlValue[]): unknown[] {
+function toSqliteParams(params: SqlValue[]): Array<string | number | null | Uint8Array> {
   return params.map((p) => {
     if (typeof p === "bigint") return Number(p); // sqlite stores as integer
     if (typeof p === "boolean") return p ? 1 : 0; // sqlite has no boolean type
@@ -243,15 +243,13 @@ class PostgresDatabase implements Database {
           }
           return { changes: r.rowCount ?? 0, lastInsertRowid };
         },
-        all: async (sql, ...p) => {
+        all: <T = Record<string, unknown>>(sql: string, ...p: SqlValue[]) => {
           const { text, values } = this.mapParams(sql, p);
-          const r = await client.query(text, values);
-          return r.rows as unknown[];
+          return client.query(text, values).then((r) => r.rows as T[]);
         },
-        get: async (sql, ...p) => {
+        get: <T = Record<string, unknown>>(sql: string, ...p: SqlValue[]) => {
           const { text, values } = this.mapParams(sql, p);
-          const r = await client.query(text, values);
-          return (r.rows[0] as unknown) ?? null;
+          return client.query(text, values).then((r) => (r.rows[0] as T) ?? null);
         },
       };
       try {

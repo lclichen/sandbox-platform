@@ -75,8 +75,8 @@ export function createImageService(db: Database) {
         input.sif_path,
         input.description ?? null,
         input.is_public ?? true,
-        encodeJson(input.tags ?? null, db.dialect),
-        encodeJson(input.default_resources ?? null, db.dialect),
+        encodeJson(input.tags ?? null, db.dialect) as SqlValue,
+        encodeJson(input.default_resources ?? null, db.dialect) as SqlValue,
       );
       return (await this.getById(Number(result.lastInsertRowid)))!;
     },

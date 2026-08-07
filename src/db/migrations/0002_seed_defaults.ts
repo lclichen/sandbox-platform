@@ -5,7 +5,7 @@
  */
 import bcrypt from "bcrypt";
 import { loadConfig } from "../../config.ts";
-import { encodeJson } from "../driver.ts";
+import { encodeJson, type SqlValue } from "../driver.ts";
 import type { Migration } from "../migrate.ts";
 
 const QUOTA_TIERS = [
@@ -111,8 +111,8 @@ export const up: Migration["up"] = async ({ db }) => {
       image.sif_path,
       image.description,
       true,
-      encodeJson(image.tags, db.dialect),
-      encodeJson(image.default_resources, db.dialect),
+      encodeJson(image.tags, db.dialect) as SqlValue,
+      encodeJson(image.default_resources, db.dialect) as SqlValue,
     );
   }
 };

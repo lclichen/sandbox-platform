@@ -22,6 +22,7 @@ import type {
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
+import { BadRequestError } from "../utils/errors.ts";
 
 export class MockExecutor implements SandboxExecutor {
   readonly kind: ExecutorKind = "mock";
@@ -202,17 +203,30 @@ export class MockExecutor implements SandboxExecutor {
     });
   }
 
-  /** Resolve a path argument (possibly relative, possibly with @ prefix) inside the container root. */
+  /**
+   * Resolve a path argument (possibly relative, possibly with @ prefix) inside
+   * the container root.
+   *
+   * SECURITY: mirrors `resolveInWorkspace` in services/workspace-storage.ts —
+   * a single-point containment check. Any traversal (`..`) that resolves
+   * outside the container root is rejected outright; the mock is NOT
+   * permissive, because it is the default executor on win32 and the factory's
+   * last-resort fallback, so an escape here is a host-escape anywhere.
+   */
   private resolveIn(handle: ContainerHandle, pathArg: string): string {
     const trimmed = pathArg.startsWith("@") ? pathArg.slice(1) : pathArg;
     const root = this.root(handle);
     if (!trimmed || trimmed === ".") return root;
+    // Block NUL bytes outright (they must never reach the filesystem layer).
+    if (trimmed.includes("\0")) {
+      throw new BadRequestError("Invalid container path");
+    }
     const abs = resolve(root, trimmed);
-    // Keep it under the root to avoid escaping the simulated sandbox.
-    const rel = abs.slice(root.length);
-    if (rel.startsWith("..")) {
-      // Allow but log; mock is permissive for development convenience.
-      return abs;
+    // Containment check: abs must equal root or live beneath it.
+    const sep = process.platform === "win32" ? "\\" : "/";
+    const prefix = root.endsWith(sep) ? root : root + sep;
+    if (abs !== root && !abs.startsWith(prefix)) {
+      throw new BadRequestError("Container path escapes the sandbox root");
     }
     return abs;
   }

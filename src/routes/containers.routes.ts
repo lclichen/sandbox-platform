@@ -13,7 +13,7 @@
  *   DELETE /:id/snapshots/:sid  delete a snapshot
  *   GET    /:id/connect         return connection info (instance + node)
  */
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { getDb, getExecutorFromReq } from "../app.ts";
 import { createContainerService } from "../services/container.service.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";

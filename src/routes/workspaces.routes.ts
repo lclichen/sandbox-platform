@@ -15,7 +15,7 @@
  * File uploads use a single raw octet-stream body (no multipart) to avoid
  * pulling in multer; the filename is provided via the `name` query parameter.
  */
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { getDb } from "../app.ts";
 import { createWorkspaceService } from "../services/workspace.service.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";

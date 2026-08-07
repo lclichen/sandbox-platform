@@ -11,11 +11,25 @@
 import { createDatabase, closeDatabase } from "../src/db/driver.ts";
 import { runMigrations, rollbackLast } from "../src/db/migrate.ts";
 import { logger } from "../src/utils/logger.ts";
+import { loadConfig, assertSecureProductionConfig } from "../src/config.ts";
 
 async function main() {
   const args = process.argv.slice(2);
   const rollback = args.includes("--rollback") || args.includes("rollback");
   const db = await createDatabase();
+
+  // Seeding (0002) uses SEED_ADMIN_PASSWORD; refuse to mint a default-credential
+  // admin in production. (Rollback never seeds, so it is not gated.)
+  if (!rollback) {
+    const secretProblems = assertSecureProductionConfig(loadConfig());
+    if (secretProblems.length > 0) {
+      for (const problem of secretProblems) {
+        logger.error({ problem }, "Insecure production configuration.");
+      }
+      logger.error("Refusing to run migrations in production with insecure secrets. Fix .env and retry.");
+      process.exit(1);
+    }
+  }
 
   try {
     if (rollback) {

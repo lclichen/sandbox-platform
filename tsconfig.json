@@ -18,5 +18,12 @@
     "verbatimModuleSyntax": false,
     "erasableSyntaxOnly": true
   },
-  "include": ["src/**/*", "scripts/**/*", "test/**/*", "knexfile.js"]
+  "include": ["src/**/*", "scripts/**/*", "test/**/*", "knexfile.js"],
+  // Cross-repo runtime smoke tests import from ../../pi-sandbox-extension
+  // (outside this project's rootDir) and poke at private members on purpose;
+  // they are compiled by vitest at runtime, not typechecked here.
+  "exclude": [
+    "test/api-key.smoke.test.ts",
+    "test/extension-client.smoke.test.ts"
+  ]
 }

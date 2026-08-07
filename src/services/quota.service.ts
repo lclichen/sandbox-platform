@@ -29,6 +29,13 @@ export interface ResourceRequest {
   disk_gb: number;
 }
 
+/** Create input: every column except the optional workspace cap (defaults to 10)
+ *  and an optional description (normalized to null by create()). */
+export type QuotaCreateInput = Omit<
+  QuotaRow,
+  "id" | "created_at" | "updated_at" | "max_workspaces_per_user" | "description"
+> & { description?: string | null; max_workspaces_per_user?: number };
+
 export function createQuotaService(db: Database) {
   const users = createUserService(db);
 
@@ -51,7 +58,7 @@ export function createQuotaService(db: Database) {
       return db.all<QuotaRow>("SELECT * FROM resource_quotas ORDER BY id");
     },
 
-    async create(input: Omit<QuotaRow, "id" | "created_at" | "updated_at">): Promise<QuotaRow> {
+    async create(input: QuotaCreateInput): Promise<QuotaRow> {
       const existing = await this.getByName(input.name);
       if (existing) throw new ConflictError(`Quota '${input.name}' already exists`);
       const result = await db.run(
