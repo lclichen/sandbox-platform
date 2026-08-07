@@ -198,4 +198,64 @@ describe("container lifecycle", () => {
       .set("Authorization", `Bearer ${userToken}`);
     expect(del.status).toBe(204);
   });
+
+  it("snapshotting a running container keeps it running (Stop-Then-Copy)", async () => {
+    ctx = await setupTestApp();
+    const admin = await adminToken(ctx);
+    const imageId = await firstImageId(ctx, admin);
+    const userToken = await createUserAndLogin(ctx, "snapatomic");
+
+    const create = await ctx
+      .request()
+      .post("/api/v1/containers")
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ imageId, name: "atomic-box" });
+    const cid = create.body.id;
+    expect(create.body.status).toBe("running");
+
+    // Put content in the container, snapshot WHILE it is running, then mutate.
+    const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+    await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/write`)
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ path: "pre.txt", content: b64("snapshot-time") });
+    const snap = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/snapshots`)
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ name: "running-v1" });
+    expect(snap.status).toBe(201);
+
+    // The container must still be running and usable after the snapshot.
+    const after = await ctx
+      .request()
+      .get(`/api/v1/containers/${cid}`)
+      .set("Authorization", `Bearer ${userToken}`);
+    expect(after.body.status).toBe("running");
+    const stillUsable = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/bash`)
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ command: "echo still-alive" });
+    expect(stillUsable.status).toBe(200);
+
+    // Mutate post-snapshot, restore, and confirm the pre-snapshot content wins.
+    await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/write`)
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ path: "pre.txt", content: b64("mutated-after") });
+    const restore = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/snapshots/${snap.body.id}/restore`)
+      .set("Authorization", `Bearer ${userToken}`);
+    expect(restore.status).toBe(200);
+    const read = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/read`)
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ path: "pre.txt" });
+    expect(Buffer.from(read.body.contentBase64, "base64").toString("utf8")).toBe("snapshot-time");
+  });
 });

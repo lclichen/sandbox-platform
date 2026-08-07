@@ -11,7 +11,7 @@
  *   GET  /stat?path=                                -> { isDirectory, isFile, size, mtimeMs }
  *   GET  /ls?path=                                   -> { entries: [{name,...}] }
  *   POST /bash       { command, cwd?, timeout?, env? } -> { stdout, stderr, exitCode, timedOut, truncated }
- *   GET  /bash/stream?command=...                    -> SSE event stream of bash output
+ *   POST /bash/stream  { command, cwd?, timeout? }    -> SSE event stream of bash output
  *   POST /grep       { pattern, path?, ... }        -> { output }
  *   POST /find       { pattern, path?, limit? }     -> { results: string[] }
  */
@@ -105,20 +105,13 @@ export function toolsRouter(): Router {
       .catch(next);
   });
 
-  // SSE streaming bash. Client reads event stream; output chunks arrive live.
-  router.get("/:id/tools/bash/stream", (req, res: Response, next) => {
-    const id = Number.parseInt(req.params.id, 10);
-    if (Number.isNaN(id)) {
-      res.status(400).json({ code: "bad_request", message: "Invalid container id" });
-      return;
-    }
-    const command = String(req.query.command ?? "");
-    if (!command) {
-      res.status(400).json({ code: "bad_request", message: "command is required" });
-      return;
-    }
-    const cwd = req.query.cwd ? String(req.query.cwd) : undefined;
-    const timeout = req.query.timeout ? Number.parseInt(String(req.query.timeout), 10) : undefined;
+  // SSE streaming bash. Client posts the command and reads the event stream;
+  // POST (not GET) so the audit middleware captures the command and the body
+  // stays out of URLs/server logs.
+  router.post("/:id/tools/bash/stream", (req, res: Response, next) => {
+    const { id } = validate(idParamSchema, req.params);
+    const body = validate(bashToolSchema, req.body);
+    const { command, cwd, timeout } = body;
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");

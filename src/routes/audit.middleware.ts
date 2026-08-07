@@ -28,9 +28,11 @@ function describe(req: Request): { action: string; resourceType: string; resourc
   if (path === "/auth/login" || path === "/auth/refresh" || path === "/auth/logout") {
     return { action: `auth.${path.split("/").pop()}`, resourceType: "auth", resourceId: null };
   }
-  // tools/* under containers/:id/tools/:op
+  // tools/* under containers/:id/tools/:op (nested ops like bash/stream join
+  // with a dot so the audit trail can tell POST /bash from POST /bash/stream).
   if (path.includes("/tools/")) {
-    const op = path.split("/tools/")[1]?.split("/")[0] ?? "unknown";
+    const opPath = path.split("/tools/")[1] ?? "";
+    const op = opPath.split("/").join(".");
     const containerId = parseId(path.split("/containers/")[1]?.split("/")[0]);
     return { action: `container.tool.${op}`, resourceType: "container", resourceId: containerId };
   }
@@ -69,6 +71,18 @@ function parseId(value: string | undefined): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
+/**
+ * Sanitize a free-text payload (bash command, tool path) for the audit trail:
+ * collapse newlines/whitespace and cap the length so the log stays one line
+ * and never becomes a log-injection vector.
+ */
+function sanitizeAuditText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const cleaned = value.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return undefined;
+  return cleaned.length > 200 ? `${cleaned.slice(0, 200)}…` : cleaned;
+}
+
 export function auditMiddleware(): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
     // Only audit mutating methods. (Tools/bash are POST, so they qualify.)
@@ -84,13 +98,29 @@ export function auditMiddleware(): RequestHandler {
       const user = (req as AuthedRequest).user;
       const status = res.statusCode < 400 ? "success" : "failure";
       const errorMessage = res.statusCode >= 400 ? `HTTP ${res.statusCode}` : null;
+      const detail: Record<string, unknown> = {
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+      };
+      // Tool ops execute arbitrary commands / touch arbitrary paths: record the
+      // command and target path so the trail answers "who ran `rm -rf` in
+      // container X". Values are sanitized and truncated (see above).
+      if (descriptor.action.startsWith("container.tool.")) {
+        const body = req.body as Record<string, unknown> | undefined;
+        const query = req.query as Record<string, unknown>;
+        const command = sanitizeAuditText(body?.command ?? query.command);
+        const toolPath = sanitizeAuditText(body?.path ?? query.path);
+        if (command) detail.command = command;
+        if (toolPath) detail.toolPath = toolPath;
+      }
       const log = createLogService(getDb(req));
       void log.record({
         userId: user?.sub ?? null,
         action: descriptor.action,
         resourceType: descriptor.resourceType,
         resourceId: descriptor.resourceId,
-        detail: { method: req.method, path: req.path, status: res.statusCode },
+        detail,
         ip: req.ip ?? null,
         status,
         errorMessage,

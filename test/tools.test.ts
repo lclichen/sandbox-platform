@@ -174,4 +174,60 @@ describe("container tools", () => {
     expect(find.status).toBe(200);
     expect(find.body.results.join("\n")).toContain("g.txt");
   });
+
+  it("bash/stream runs via POST and streams an end event", async () => {
+    ctx = await setupTestApp();
+    const token = await createUserAndLogin(ctx, "tooluser7");
+    const cid = await newContainer(ctx, token, "stream-box");
+    const res = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/bash/stream`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ command: "echo streamed-output" });
+    expect(res.status).toBe(200);
+    const text = res.text;
+    expect(text).toContain("event: data");
+    expect(text).toContain("event: end");
+    expect(Buffer.from(text.match(/chunk":"([^"]+)/)?.[1] ?? "", "base64").toString("utf8")).toContain("streamed-output");
+  });
+
+  it("audits tool commands with the command text in detail", async () => {
+    ctx = await setupTestApp();
+    const token = await createUserAndLogin(ctx, "tooluser8");
+    const cid = await newContainer(ctx, token, "audit-box");
+    await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/bash`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ command: "echo audit-me" });
+    await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/bash/stream`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ command: "echo stream-me" });
+    await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/write`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ path: "audit.txt", content: b64("x") });
+
+    const admin = await adminToken(ctx);
+    const logs = await ctx
+      .request()
+      .get("/api/v1/admin/logs?resourceType=container")
+      .set("Authorization", `Bearer ${admin}`);
+    expect(logs.status).toBe(200);
+    const actions = logs.body.logs.map((l: { action: string }) => l.action);
+    // bash/stream is its own action, distinct from plain bash.
+    expect(actions).toContain("container.tool.bash.stream");
+    expect(actions).toContain("container.tool.bash");
+    expect(actions).toContain("container.tool.write");
+
+    const bashLog = logs.body.logs.find((l: { action: string }) => l.action === "container.tool.bash");
+    expect(bashLog.detail.command).toBe("echo audit-me");
+    const streamLog = logs.body.logs.find((l: { action: string }) => l.action === "container.tool.bash.stream");
+    expect(streamLog.detail.command).toBe("echo stream-me");
+    const writeLog = logs.body.logs.find((l: { action: string }) => l.action === "container.tool.write");
+    expect(writeLog.detail.toolPath).toBe("audit.txt");
+  });
 });
