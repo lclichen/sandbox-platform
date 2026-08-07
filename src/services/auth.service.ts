@@ -44,17 +44,21 @@ export function createAuthService(db: Database) {
     return n * (unit === "s" ? 1 : unit === "m" ? 60 : 3600);
   }
 
-  async function issueTokenPair(user: UserRow, clientIp?: string): Promise<TokenPair> {
+  async function issueTokenPair(user: UserRow, clientIp?: string, familyId?: string): Promise<TokenPair> {
     const jti = generateJti();
     const refreshToken = signRefreshToken(user.id, jti);
     const expiresAt = decodeExpiry(refreshToken);
+    // Every login starts a NEW family; rotations during refresh keep the same
+    // family so a detected replay can revoke everything at once (P1-3).
+    const family = familyId ?? jti;
     await db.run(
-      `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, client_ip)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, client_ip, family_id)
+       VALUES (?, ?, ?, ?, ?)`,
       user.id,
       hashToken(refreshToken),
       expiresAt.toISOString(),
       clientIp ?? null,
+      family,
     );
     return {
       accessToken: signAccessToken(user),
@@ -84,21 +88,29 @@ export function createAuthService(db: Database) {
       }
       if (claims.type !== "refresh") throw new UnauthorizedError("Wrong token type");
 
-      const stored = await db.get<{ id: number; revoked_at: string | null; user_id: number }>(
-        "SELECT id, revoked_at, user_id FROM refresh_tokens WHERE token_hash = ?",
+      const stored = await db.get<{ id: number; revoked_at: string | null; user_id: number; family_id: string }>(
+        "SELECT id, revoked_at, user_id, family_id FROM refresh_tokens WHERE token_hash = ?",
         hashToken(refreshToken),
       );
       if (!stored) throw new UnauthorizedError("Refresh token not recognized");
-      if (stored.revoked_at) throw new UnauthorizedError("Refresh token already used");
+      if (stored.revoked_at) {
+        // Reuse detection: a revoked token being replayed is a theft signal.
+        // Revoke the WHOLE family (all rotations from the same login), not just
+        // this one row — otherwise the thief keeps rotating a sibling token.
+        await db.run(
+          "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE family_id = ? AND revoked_at IS NULL",
+          stored.family_id,
+        );
+        throw new UnauthorizedError("Refresh token already used");
+      }
 
-      // Reuse detection: if token was revoked, token reuse likely indicates theft.
       const user = await users.getById(stored.user_id);
       if (!user) throw new UnauthorizedError("User no longer exists");
       if (user.status === "disabled") throw new ForbiddenError("Account is disabled");
 
-      // Rotate: revoke old, issue new.
+      // Rotate: revoke old, issue new within the same family.
       await db.run("UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?", stored.id);
-      return issueTokenPair(user, clientIp);
+      return issueTokenPair(user, clientIp, stored.family_id);
     },
 
     async logout(refreshToken: string): Promise<void> {

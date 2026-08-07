@@ -28,6 +28,7 @@ const migrationModules: Array<{ id: string; module: string }> = [
   { id: "0003_api_keys", module: "./migrations/0003_api_keys.ts" },
   { id: "0004_workspaces", module: "./migrations/0004_workspaces.ts" },
   { id: "0005_reaper", module: "./migrations/0005_reaper.ts" },
+  { id: "0006_refresh_family", module: "./migrations/0006_refresh_family.ts" },
 ];
 
 async function ensureSchemaMigrationsTable(db: Database): Promise<void> {

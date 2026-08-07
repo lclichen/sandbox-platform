@@ -50,7 +50,7 @@ describe("auth", () => {
     expect(res.status).toBe(401);
   });
 
-  it("rotates refresh tokens and revokes the old one", async () => {
+  it("rotates refresh tokens and revokes the whole family on replay", async () => {
     ctx = await setupTestApp();
     const login = await ctx
       .request()
@@ -61,9 +61,15 @@ describe("auth", () => {
     const refresh1 = await ctx.request().post("/api/v1/auth/refresh").send({ refreshToken: oldRefresh });
     expect(refresh1.status).toBe(200);
     expect(refresh1.body.refreshToken).not.toBe(oldRefresh);
+    const sibling = refresh1.body.refreshToken;
 
+    // Replay of the revoked token is a theft signal: the ENTIRE family dies
+    // (P1-3), so the sibling token rotated alongside it is dead too.
     const reuse = await ctx.request().post("/api/v1/auth/refresh").send({ refreshToken: oldRefresh });
     expect(reuse.status).toBe(401);
+
+    const siblingReuse = await ctx.request().post("/api/v1/auth/refresh").send({ refreshToken: sibling });
+    expect(siblingReuse.status).toBe(401);
   });
 });
 
