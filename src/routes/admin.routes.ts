@@ -71,7 +71,7 @@ export function adminRouter(): Router {
       .list(undefined, query)
       .then((rows) => {
         const svc = createContainerService(getDb(req), getExecutorFromReq(req));
-        res.json({ containers: rows.map((r) => svc._toPublic(r)) });
+        res.json({ containers: rows.map((r) => svc._toPublic(r, true)) });
       })
       .catch(next);
   });

@@ -66,6 +66,14 @@ export class InvalidStateError extends HttpError {
 /** Translate any unknown error into a generic 500. */
 export function toHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
-  const message = error instanceof Error ? error.message : String(error);
+  // P2-1: in production, never leak internal details (DB connection strings,
+  // file paths, stack traces) to clients. The full error is logged by app.ts
+  // (`logger.error({ err, ... })`); clients get a generic message.
+  const message =
+    process.env.NODE_ENV === "production"
+      ? "Internal server error"
+      : error instanceof Error
+        ? error.message
+        : String(error);
   return new HttpError(500, "internal_error", message);
 }

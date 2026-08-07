@@ -39,19 +39,21 @@ export function containersRouter(): Router {
 
   router.post("/", (req, res, next) => {
     const body = validate(createContainerSchema, req.body);
+    const a = actor(req);
     const svc = createContainerService(getDb(req), getExecutorFromReq(req));
     svc
       .create(currentUserId(req), body)
-      .then((row) => res.status(201).json(svc._toPublic(row)))
+      .then((row) => res.status(201).json(svc._toPublic(row, a.isAdmin)))
       .catch(next);
   });
 
   router.get("/", (req, res, next) => {
     const query = validate(listContainersSchema, req.query);
+    const a = actor(req);
     const svc = createContainerService(getDb(req), getExecutorFromReq(req));
     svc
       .list(currentUserId(req), query)
-      .then((rows) => res.json({ containers: rows.map((r) => svc._toPublic(r)) }))
+      .then((rows) => res.json({ containers: rows.map((r) => svc._toPublic(r, a.isAdmin)) }))
       .catch(next);
   });
 
@@ -61,7 +63,7 @@ export function containersRouter(): Router {
     const svc = createContainerService(getDb(req), getExecutorFromReq(req));
     svc
       .requireOwned(id, a.id, a.isAdmin)
-      .then((row) => res.json(svc._toPublic(row)))
+      .then((row) => res.json(svc._toPublic(row, a.isAdmin)))
       .catch(next);
   });
 
@@ -71,7 +73,7 @@ export function containersRouter(): Router {
     const svc = createContainerService(getDb(req), getExecutorFromReq(req));
     svc
       .start(id, a.id, a.isAdmin)
-      .then((row) => res.json(svc._toPublic(row)))
+      .then((row) => res.json(svc._toPublic(row, a.isAdmin)))
       .catch(next);
   });
 
@@ -81,7 +83,7 @@ export function containersRouter(): Router {
     const svc = createContainerService(getDb(req), getExecutorFromReq(req));
     svc
       .stop(id, a.id, a.isAdmin)
-      .then((row) => res.json(svc._toPublic(row)))
+      .then((row) => res.json(svc._toPublic(row, a.isAdmin)))
       .catch(next);
   });
 
@@ -126,7 +128,7 @@ export function containersRouter(): Router {
     const svc = createContainerService(getDb(req), getExecutorFromReq(req));
     svc
       .restoreSnapshot(id, sid, actor(req).id, actor(req).isAdmin)
-      .then((row) => res.json(svc._toPublic(row)))
+      .then((row) => res.json(svc._toPublic(row, actor(req).isAdmin)))
       .catch(next);
   });
 
@@ -160,6 +162,12 @@ export function containersRouter(): Router {
           executor: handle.id,
           // Hint to clients: tool operations go via /api/v1/containers/:id/tools/*.
           toolsBase: `/api/v1/containers/${row.id}/tools`,
+        });
+        // The connect handshake is instantaneous; settle the session record so
+        // accounting does not accumulate open rows (P2-3). Long-lived relay
+        // traffic is accounted by the tools bash/stream session.
+        void svc.closeSession(sessionId, 0, 0).catch(() => {
+          /* best-effort */
         });
       })
       .catch(next);

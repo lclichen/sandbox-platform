@@ -52,10 +52,19 @@ export interface ContainerPublic extends Omit<ContainerRow, "instance_name" | "o
   env: Record<string, string> | null;
 }
 
-function toPublic(row: ContainerRow, dialect: string): ContainerPublic {
-  const { env: _env, ...rest } = row;
+/**
+ * Public projection of a container row. `error_message` may embed internal
+ * paths/runtime detail, so it is only exposed to admins (P2-1).
+ */
+function toPublic(row: ContainerRow, dialect: string, isAdmin = false): ContainerPublic {
+  const { env: _env, error_message: _errorMessage, ...rest } = row;
   void _env;
-  return { ...rest, env: decodeJson<Record<string, string>>(row.env ?? null, dialect as never) ?? null };
+  void _errorMessage;
+  return {
+    ...rest,
+    env: decodeJson<Record<string, string>>(row.env ?? null, dialect as never) ?? null,
+    error_message: isAdmin ? row.error_message : null,
+  };
 }
 
 export interface CreateContainerInput {
@@ -411,7 +420,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
     },
 
     /** Expose helpers for the routes layer. */
-    _toPublic: (row: ContainerRow): ContainerPublic => toPublic(row, db.dialect),
+    _toPublic: (row: ContainerRow, isAdmin = false): ContainerPublic => toPublic(row, db.dialect, isAdmin),
     _quotas: quotas,
     _images: images,
     _executor: executor,

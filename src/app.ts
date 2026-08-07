@@ -8,6 +8,8 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import helmet from "helmet";
 import { existsSync } from "node:fs";
+import { mkdir, access } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { resolve, extname, posix as posixPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { toHttpError, HttpError } from "./utils/errors.ts";
@@ -16,6 +18,7 @@ import { loadConfig } from "./config.ts";
 import { createDatabase, type Database } from "./db/driver.ts";
 import { getExecutor, type SandboxExecutorRef } from "./executors/index.ts";
 import { loginLimiter, refreshLimiter, bashLimiter } from "./middleware/rate-limit.ts";
+import { metricsMiddleware, metricsHandler, registry } from "./middleware/metrics.ts";
 import { authRouter } from "./routes/auth.routes.ts";
 import { usersRouter } from "./routes/users.routes.ts";
 import { quotasRouter } from "./routes/quotas.routes.ts";
@@ -71,10 +74,38 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     next();
   });
 
-  // Health check (no auth).
+  // Health check (no auth). Liveness only: the process is up.
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", dialect: db.dialect, executor: executor.kind });
   });
+
+  // Readiness probe (P2-2): DB reachable + overlay base dir writable.
+  app.get("/ready", async (_req: Request, res: Response) => {
+    try {
+      await db.get("SELECT 1");
+      const overlayBase = loadConfig().executor.apptainer.overlayBaseDir;
+      await mkdir(overlayBase, { recursive: true });
+      await access(overlayBase, fsConstants.W_OK);
+      res.json({ status: "ready", dialect: db.dialect, executor: executor.kind });
+    } catch {
+      res.status(503).json({ status: "not_ready" });
+    }
+  });
+
+  // Prometheus metrics (P2-2).
+  app.get("/metrics", async (_req: Request, res: Response) => {
+    try {
+      const body = await metricsHandler(db);
+      res.setHeader("Content-Type", registry.contentType);
+      res.end(body);
+    } catch (err) {
+      logger.error({ err }, "metrics scrape failed");
+      res.status(500).json({ code: "internal_error", message: "Metrics unavailable" });
+    }
+  });
+
+  // Request instrumentation (before routers so it wraps everything).
+  app.use(metricsMiddleware());
 
   // Audit mutating requests. Mounted under /api/v1 so req.path is relative,
   // BEFORE the routers so res.on('finish') captures their outcome.

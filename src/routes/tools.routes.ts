@@ -18,6 +18,7 @@
 import { Router, type Response } from "express";
 import { getDb, getExecutorFromReq } from "../app.ts";
 import { createToolsService } from "../services/tools.service.ts";
+import { createContainerService } from "../services/container.service.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
 import {
   readToolSchema,
@@ -118,23 +119,41 @@ export function toolsRouter(): Router {
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();
 
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    let sessionId: number | null = null;
+    let bytesOut = 0;
+    const writeEvent = (payload: string): void => {
+      bytesOut += Buffer.byteLength(payload);
+      res.write(payload);
+    };
+    // P2-3: settle the relay session when the stream ends — either a client
+    // disconnect or normal completion — so accounting rows don't accumulate.
+    res.on("close", () => {
+      if (sessionId !== null) {
+        void svc.closeSession(sessionId, 0, bytesOut).catch(() => {
+          /* best-effort accounting */
+        });
+      }
+    });
+
     (async () => {
       const tools = createToolsService(getDb(req), getExecutorFromReq(req));
       try {
         const { handle } = await tools.containers.resolveRunningHandle(id, currentUserId(req));
+        sessionId = await svc.openSession(id, currentUserId(req), req.ip);
         const executor = getExecutorFromReq(req);
         const result = await executor.exec(handle, command, {
           cwd,
           timeout,
           onData: (chunk: Buffer) => {
-            res.write(`event: data\ndata: ${JSON.stringify({ chunk: chunk.toString("base64") })}\n\n`);
+            writeEvent(`event: data\ndata: ${JSON.stringify({ chunk: chunk.toString("base64") })}\n\n`);
           },
         });
-        res.write(
+        writeEvent(
           `event: end\ndata: ${JSON.stringify({ exitCode: result.exitCode, timedOut: result.timedOut })}\n\n`,
         );
       } catch (err) {
-        res.write(
+        writeEvent(
           `event: error\ndata: ${JSON.stringify({ message: err instanceof Error ? err.message : String(err) })}\n\n`,
         );
       } finally {
