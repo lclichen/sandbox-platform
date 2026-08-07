@@ -7,6 +7,7 @@ import { ApiKeysModal } from "./ApiKeysModal";
 const COMMON_NAV: Array<{ to: string; label: string }> = [
   { to: "/", label: "Dashboard" },
   { to: "/containers", label: "Containers" },
+  { to: "/workspaces", label: "Workspaces" },
   { to: "/images", label: "Images" },
   { to: "/logs", label: "Logs" },
 ];

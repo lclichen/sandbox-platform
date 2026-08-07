@@ -56,6 +56,7 @@ export const createQuotaSchema = z.object({
   max_memory_mb: z.number().int().min(0),
   max_disk_gb: z.number().int().min(0),
   max_snapshots_per_container: z.number().int().min(0),
+  max_workspaces_per_user: z.number().int().min(0).max(10000).optional(),
 });
 
 export const updateQuotaSchema = createQuotaSchema.partial();
@@ -92,6 +93,7 @@ export const createContainerSchema = z.object({
   memoryMb: z.number().int().min(128).optional(),
   diskGb: z.number().int().min(1).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  workspaceId: z.number().int().positive().optional(),
 });
 
 export const listContainersSchema = paginationSchema.extend({
@@ -140,4 +142,36 @@ export const findToolSchema = z.object({
   pattern: z.string().min(1),
   path: z.string().max(4096).optional(),
   limit: z.number().int().min(1).max(1000).optional(),
+});
+
+// ----- workspaces -----
+export const createWorkspaceSchema = z.object({
+  name: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_.\s-]+$/, "Letters, digits, _ . space - only"),
+  description: z.string().max(2048).optional(),
+  isTemplate: z.boolean().optional(),
+});
+
+export const updateWorkspaceSchema = z.object({
+  name: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_.\s-]+$/, "Letters, digits, _ . space - only").optional(),
+  description: z.string().max(2048).nullable().optional(),
+  isTemplate: z.boolean().optional(),
+});
+
+export const listWorkspacesSchema = paginationSchema;
+
+// Workspace file path: a non-empty relative path with no shell/host metacharacters.
+export const workspacePathSchema = z.object({
+  path: z
+    .string()
+    .min(1)
+    .max(1024)
+    .regex(/^[^\u0000<>:"|?*]+$/, "Path contains forbidden characters"),
+});
+
+export const workspaceDirSchema = z.object({
+  path: z
+    .string()
+    .min(1)
+    .max(1024)
+    .regex(/^[^\u0000<>:"|?*]+$/, "Path contains forbidden characters"),
 });

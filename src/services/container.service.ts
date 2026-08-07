@@ -13,6 +13,7 @@ import type { SandboxExecutor, ContainerHandle } from "../executors/types.ts";
 import { handleFromRow, persistRunningState } from "../executors/types.ts";
 import { createQuotaService, type ResourceRequest } from "./quota.service.ts";
 import { createImageService } from "./image.service.ts";
+import { createWorkspaceService } from "./workspace.service.ts";
 import {
   NotFoundError,
   ForbiddenError,
@@ -58,11 +59,13 @@ export interface CreateContainerInput {
   memoryMb?: number;
   diskGb?: number;
   env?: Record<string, string>;
+  workspaceId?: number;
 }
 
 export function createContainerService(db: Database, executor: SandboxExecutor) {
   const quotas = createQuotaService(db);
   const images = createImageService(db);
+  const workspaces = createWorkspaceService(db);
 
   return {
     async getById(id: number): Promise<ContainerRow | null> {
@@ -129,6 +132,15 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
       );
       const containerId = Number(result.lastInsertRowid);
 
+      // Resolve an optional workspace to seed /workspace from. Ownership is
+      // enforced via requireOwned (404 for non-owners). The host path is passed
+      // to the executor which decides how to apply it (cp or bind-mount).
+      let seedFromPath: string | undefined;
+      if (input.workspaceId !== undefined) {
+        const ws = await workspaces.requireOwned(input.workspaceId, userId);
+        seedFromPath = workspaces.hostDir(ws);
+      }
+
       try {
         const handle = await executor.create({
           id: instanceName,
@@ -137,6 +149,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
           memoryMb: request.memory_mb,
           diskGb: request.disk_gb,
           env: input.env,
+          seedFromPath,
         });
         // Record overlay path + node, then mark running.
         await db.run(

@@ -19,6 +19,7 @@ import { quotasRouter } from "./routes/quotas.routes.ts";
 import { imagesRouter } from "./routes/images.routes.ts";
 import { containersRouter } from "./routes/containers.routes.ts";
 import { toolsRouter } from "./routes/tools.routes.ts";
+import { workspacesRouter } from "./routes/workspaces.routes.ts";
 import { auditMiddleware } from "./routes/audit.middleware.ts";
 import { adminRouter } from "./routes/admin.routes.ts";
 import { publicImagesRouter } from "./routes/images.public.routes.ts";
@@ -60,6 +61,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.use("/api/v1/admin/images", imagesRouter());
   app.use("/api/v1/containers", containersRouter());
   app.use("/api/v1/containers", toolsRouter());
+  app.use("/api/v1/workspaces", workspacesRouter());
   app.use("/api/v1/images", publicImagesRouter());
   app.use("/api/v1/logs", publicLogsRouter());
   app.use("/api/v1/admin", adminRouter());

@@ -412,6 +412,27 @@ td.actions {
 .row-grid.two {
   grid-template-columns: 1fr 1fr;
 }
+
+/* ---- workspace file browser ---- */
+.ws-breadcrumbs {
+  padding: 4px 0 10px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+  word-break: break-all;
+}
+.ws-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ws-file-list {
+  max-height: 50vh;
+  overflow: auto;
+}
+.ws-file-list table {
+  width: 100%;
+}
 .expandable-content {
   padding: 10px 24px;
   background: var(--panel-2);

@@ -214,4 +214,85 @@ export const api = {
     limit?: number;
     offset?: number;
   }) => request<{ total: number; logs: import("./types").LogRow[] }>(`/api/v1/logs?${qs(params)}`),
+
+  // workspaces: persistent per-user file storage; seeds a container's /workspace on create
+  listWorkspaces: (params: { limit?: number; offset?: number; search?: string } = {}) =>
+    request<{ total: number; workspaces: import("./types").WorkspaceRow[] }>(
+      `/api/v1/workspaces?${qs(params)}`,
+    ),
+  createWorkspace: (body: { name: string; description?: string; isTemplate?: boolean }) =>
+    request<import("./types").WorkspaceRow>("/api/v1/workspaces", { method: "POST", body }),
+  updateWorkspace: (
+    id: number,
+    body: Partial<{ name: string; description: string | null; isTemplate: boolean }>,
+  ) => request<import("./types").WorkspaceRow>(`/api/v1/workspaces/${id}`, { method: "PATCH", body }),
+  deleteWorkspace: (id: number) => request<void>(`/api/v1/workspaces/${id}`, { method: "DELETE" }),
+  listWorkspaceFiles: (id: number, path: string = "/") =>
+    request<{ path: string; entries: import("./types").WorkspaceFileEntry[] }>(
+      `/api/v1/workspaces/${id}/files?${qs({ path })}`,
+    ),
+  /**
+   * Upload a single file as an octet-stream. `dirPath` is the parent directory
+   * inside the workspace (use "/" or "" for the root). Returns the new file's
+   * path. NOTE: this bypasses the auto-401-refresh path because it sends a raw
+   * Buffer; callers should rely on a fresh token at call time.
+   */
+  uploadWorkspaceFile: async (id: number, dirPath: string, filename: string, data: ArrayBuffer) => {
+    const path = dirPath === "/" || dirPath === "" ? "" : dirPath;
+    const res = await fetch(
+      `/api/v1/workspaces/${id}/files?${qs({ path, name: filename })}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: data,
+      },
+    );
+    if (res.status === 401) {
+      const refreshed = await refreshTokens();
+      if (!refreshed) {
+        onAuthFailure?.();
+        throw new ApiError(401, "unauthorized", "Session expired");
+      }
+      return (await fetch(
+        `/api/v1/workspaces/${id}/files?${qs({ path, name: filename })}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+          },
+          body: data,
+        },
+      )).json();
+    }
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  },
+  downloadWorkspaceFile: async (id: number, path: string): Promise<Blob> => {
+    const url = `/api/v1/workspaces/${id}/files/content?${qs({ path })}`;
+    const res = await fetch(url, {
+      headers: { ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+    });
+    if (res.status === 401) {
+      const refreshed = await refreshTokens();
+      if (!refreshed) {
+        onAuthFailure?.();
+        throw new ApiError(401, "unauthorized", "Session expired");
+      }
+      const retry = await fetch(url, {
+        headers: { ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+      });
+      if (!retry.ok) throw await parseError(retry);
+      return retry.blob();
+    }
+    if (!res.ok) throw await parseError(res);
+    return res.blob();
+  },
+  deleteWorkspaceFile: (id: number, path: string) =>
+    request<void>(`/api/v1/workspaces/${id}/files?${qs({ path })}`, { method: "DELETE" }),
+  makeWorkspaceDir: (id: number, path: string) =>
+    request<{ path: string }>(`/api/v1/workspaces/${id}/dirs?${qs({ path })}`, { method: "POST" }),
 };

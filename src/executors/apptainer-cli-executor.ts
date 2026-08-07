@@ -50,11 +50,25 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   async create(req: CreateRequest): Promise<ContainerHandle> {
     const overlayPath = this.overlayPathFor(req.id);
     await mkdir(overlayPath, { recursive: true });
+    // Seed the overlay's /workspace from a host-side workspace directory. The
+    // overlay is a directory this executor manages locally, so a plain cp lands
+    // the files where the container will see them mounted.
+    let bindArgs: string[] = [];
+    if (req.seedFromPath) {
+      try {
+        const seedTarget = `${overlayPath}/workspace`;
+        await mkdir(seedTarget, { recursive: true });
+        await cp(req.seedFromPath, seedTarget, { recursive: true });
+      } catch (err) {
+        logger.warn({ id: req.id, seedFromPath: req.seedFromPath, err: (err as Error).message }, "ApptainerCliExecutor: workspace seed copy failed");
+      }
+    }
     await this.runCli([
       "instance", "start",
       ...(req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       "--overlay", overlayPath,
+      ...bindArgs,
       req.imagePath,
       req.id,
     ]);

@@ -42,6 +42,7 @@ function describe(req: Request): { action: string; resourceType: string; resourc
     quotas: "quota",
     images: "image",
     containers: "container",
+    workspaces: "workspace",
   };
   const head = cleaned[0] ?? "";
   const resourceType = resourceMap[head] ?? head.replace(/s$/, "");

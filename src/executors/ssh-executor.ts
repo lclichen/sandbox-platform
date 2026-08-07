@@ -77,11 +77,23 @@ export class SshExecutor implements SandboxExecutor {
     const overlayPath = req.overlayPath ?? `/srv/apptainer/overlays/${req.id}.ext3`;
     // Create the overlay if missing (directory-style overlay for simplicity).
     await this.execRemote(`mkdir -p ${shellQuote(overlayPath)}`);
+
+    // If a workspace seed directory is provided, push it to the remote host and
+    // bind-mount it at /workspace inside the container. The remote staging path
+    // is unique per instance so concurrent creates do not collide.
+    let bindOpt = "";
+    if (req.seedFromPath) {
+      const remoteSeed = `/srv/apptainer/workspace-seeds/${req.id}`;
+      await this.execRemote(`rm -rf ${shellQuote(remoteSeed)} && mkdir -p ${shellQuote(remoteSeed)}`);
+      await this.ssh.putDirectory(req.seedFromPath, remoteSeed, { recursive: true });
+      bindOpt = `--bind ${shellQuote(remoteSeed)}:/workspace`;
+    }
+
     // Start the instance.
     const cpuOpt = req.cpu ? `--cpus ${req.cpu}` : "";
     const memOpt = req.memoryMb ? `--memory ${req.memoryMb}M` : "";
     await this.execRemote(
-      `apptainer instance start ${cpuOpt} ${memOpt} --overlay ${shellQuote(overlayPath)} ${shellQuote(req.imagePath)} ${shellQuote(req.id)}`,
+      `apptainer instance start ${cpuOpt} ${memOpt} --overlay ${shellQuote(overlayPath)} ${bindOpt} ${shellQuote(req.imagePath)} ${shellQuote(req.id)}`,
     );
     return { id: req.id, node: host, overlayPath, running: true };
   }

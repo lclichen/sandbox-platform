@@ -54,6 +54,20 @@ export interface CreateRequest {
   env?: Record<string, string>;
   /** Per-container node override (SSH executor); falls back to config default. */
   node?: string;
+  /**
+   * Caller-supplied overlay path. When omitted the executor derives a default
+   * (e.g. `<overlayBaseDir>/<id>`). Documented here because the SSH/CLI
+   * executors already read it; previously undeclared.
+   */
+  overlayPath?: string;
+  /**
+   * Host-side source directory whose contents seed the container's /workspace
+   * at create time. Each executor decides how to apply it:
+   *   - MockExecutor / ApptainerCliExecutor: cp -r into the container root.
+   *   - SshExecutor: putDirectory to the remote, then --bind <path>:/workspace.
+   * When omitted, the container starts with an empty /workspace (image default).
+   */
+  seedFromPath?: string;
 }
 
 export interface FileStat {

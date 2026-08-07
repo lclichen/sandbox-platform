@@ -67,6 +67,7 @@ export interface AppConfig {
       bin: string;
       overlayBaseDir: string;
       imageBaseDir: string;
+      workspaceBaseDir: string;
     };
   };
 }
@@ -106,6 +107,7 @@ export function loadConfig(): AppConfig {
         bin: required("APPTAINER_BIN", "apptainer"),
         overlayBaseDir: required("OVERLAY_BASE_DIR", "./data/overlays"),
         imageBaseDir: required("IMAGE_BASE_DIR", "./data/images"),
+        workspaceBaseDir: required("WORKSPACE_BASE_DIR", "./data/workspaces"),
       },
     },
   };

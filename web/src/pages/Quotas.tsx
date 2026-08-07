@@ -12,6 +12,7 @@ const EMPTY: Omit<QuotaRow, "id" | "created_at" | "updated_at"> = {
   max_memory_mb: 2048,
   max_disk_gb: 10,
   max_snapshots_per_container: 5,
+  max_workspaces_per_user: 10,
 };
 
 export function Quotas() {
@@ -49,6 +50,7 @@ export function Quotas() {
         max_memory_mb: q.max_memory_mb,
         max_disk_gb: q.max_disk_gb,
         max_snapshots_per_container: q.max_snapshots_per_container,
+        max_workspaces_per_user: q.max_workspaces_per_user,
       },
     });
 
@@ -73,13 +75,14 @@ export function Quotas() {
               <th>Memory</th>
               <th>Disk</th>
               <th>Snapshots/container</th>
+              <th>Workspaces/user</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={7} className="center-msg">
+                <td colSpan={8} className="center-msg">
                   Loading…
                 </td>
               </tr>
@@ -92,6 +95,7 @@ export function Quotas() {
                   <td>{q.max_memory_mb} MB</td>
                   <td>{q.max_disk_gb} GB</td>
                   <td>{q.max_snapshots_per_container}</td>
+                  <td>{q.max_workspaces_per_user}</td>
                   <td className="actions">
                     <button className="small" onClick={() => startEdit(q)}>
                       Edit
@@ -208,6 +212,15 @@ function QuotaModal({
           min={0}
           value={draft.max_snapshots_per_container}
           onChange={setNum("max_snapshots_per_container")}
+        />
+      </div>
+      <div className="form-field">
+        <label>Max workspaces per user</label>
+        <input
+          type="number"
+          min={0}
+          value={draft.max_workspaces_per_user}
+          onChange={setNum("max_workspaces_per_user")}
         />
       </div>
       {error && <div className="error-banner">{error}</div>}

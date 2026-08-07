@@ -25,8 +25,32 @@ export interface QuotaRow {
   max_memory_mb: number;
   max_disk_gb: number;
   max_snapshots_per_container: number;
+  max_workspaces_per_user: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface WorkspaceRow {
+  id: number;
+  user_id: number;
+  name: string;
+  description: string | null;
+  storage_path: string;
+  size_bytes: number;
+  file_count: number;
+  source_container_id: number | null;
+  is_template: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceFileEntry {
+  name: string;
+  /** POSIX-style relative path within the workspace (e.g. "sub/dir/f.txt"). */
+  path: string;
+  isDir: boolean;
+  size: number;
+  mtime: string;
 }
 
 export interface ImageRow {

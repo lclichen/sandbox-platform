@@ -18,6 +18,7 @@ export interface QuotaRow {
   max_memory_mb: number;
   max_disk_gb: number;
   max_snapshots_per_container: number;
+  max_workspaces_per_user: number;
   created_at: string;
   updated_at: string;
 }
@@ -55,8 +56,8 @@ export function createQuotaService(db: Database) {
       if (existing) throw new ConflictError(`Quota '${input.name}' already exists`);
       const result = await db.run(
         `INSERT INTO resource_quotas
-          (name, description, max_containers, max_cpu_cores, max_memory_mb, max_disk_gb, max_snapshots_per_container)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          (name, description, max_containers, max_cpu_cores, max_memory_mb, max_disk_gb, max_snapshots_per_container, max_workspaces_per_user)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         input.name,
         input.description ?? null,
         input.max_containers,
@@ -64,6 +65,7 @@ export function createQuotaService(db: Database) {
         input.max_memory_mb,
         input.max_disk_gb,
         input.max_snapshots_per_container,
+        input.max_workspaces_per_user ?? 10,
       );
       return (await this.getById(Number(result.lastInsertRowid)))!;
     },
@@ -129,6 +131,25 @@ export function createQuotaService(db: Database) {
       }
       if (request.disk_gb > quota.max_disk_gb) {
         throw new QuotaExceededError(`Disk ${request.disk_gb}GB exceeds quota ${quota.max_disk_gb}GB`, { limit: quota.max_disk_gb });
+      }
+      return quota;
+    },
+
+    /**
+     * Enforce the user's workspace-count quota against a new workspace.
+     */
+    async assertCanCreateWorkspace(userId: number): Promise<QuotaRow> {
+      const quota = await this.forUser(userId);
+      const usage = await db.get<{ c: number }>(
+        "SELECT COUNT(*) AS c FROM workspaces WHERE user_id = ?",
+        userId,
+      );
+      const used = Number(usage?.c ?? 0);
+      if (used >= quota.max_workspaces_per_user) {
+        throw new QuotaExceededError(
+          `Workspace quota exceeded (${used}/${quota.max_workspaces_per_user})`,
+          { used, limit: quota.max_workspaces_per_user },
+        );
       }
       return quota;
     },

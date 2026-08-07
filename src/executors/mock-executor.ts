@@ -54,6 +54,16 @@ export class MockExecutor implements SandboxExecutor {
     await mkdir(root, { recursive: true });
     // Seed a tiny marker so the "container" looks initialized.
     await fsWriteFile(join(root, ".sandbox_root"), `mock container ${req.id}\nimage=${req.imagePath}\n`);
+    // Seed /workspace from a host-side workspace directory when requested.
+    if (req.seedFromPath) {
+      const wsTarget = join(root, "workspace");
+      await mkdir(wsTarget, { recursive: true });
+      try {
+        await cp(req.seedFromPath, wsTarget, { recursive: true });
+      } catch (err) {
+        logger.warn({ id: req.id, seedFromPath: req.seedFromPath, err: (err as Error).message }, "MockExecutor: workspace seed copy failed");
+      }
+    }
     const handle: ContainerHandle = {
       id: req.id,
       node: "mock-local",
