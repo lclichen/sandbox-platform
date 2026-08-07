@@ -46,6 +46,8 @@ export interface AppConfig {
   nodeEnv: string;
   port: number;
   host: string;
+  /** Number of reverse-proxy hops (0 = direct client). See rate-limit.ts. */
+  trustProxy: number;
   db: {
     dialect: DbDialect;
     sqlitePath: string;
@@ -59,6 +61,12 @@ export interface AppConfig {
   seed: {
     adminUsername: string;
     adminPassword: string;
+  };
+  rateLimit: {
+    enabled: boolean;
+    loginPerMinute: number;
+    refreshPerMinute: number;
+    bashPerMinute: number;
   };
   executor: {
     kind: ExecutorKind;
@@ -90,10 +98,12 @@ let cached: AppConfig | undefined;
 
 export function loadConfig(): AppConfig {
   if (cached) return cached;
+  const nodeEnv = required("NODE_ENV", "development");
   cached = {
-    nodeEnv: required("NODE_ENV", "development"),
+    nodeEnv,
     port: int("PORT", 3000),
     host: required("HOST", "0.0.0.0"),
+    trustProxy: int("TRUST_PROXY", 0),
     db: {
       dialect: asDialect(required("DB_DIALECT", "sqlite")),
       sqlitePath: required("DB_SQLITE_PATH", "./data/sandbox.db"),
@@ -107,6 +117,13 @@ export function loadConfig(): AppConfig {
     seed: {
       adminUsername: required("SEED_ADMIN_USERNAME", "admin"),
       adminPassword: required("SEED_ADMIN_PASSWORD", "changeme123"),
+    },
+    // Brute-force / abuse protection is on by default in production.
+    rateLimit: {
+      enabled: bool("RATE_LIMIT_ENABLED", nodeEnv === "production"),
+      loginPerMinute: int("RATE_LIMIT_LOGIN_PER_MINUTE", 10),
+      refreshPerMinute: int("RATE_LIMIT_REFRESH_PER_MINUTE", 30),
+      bashPerMinute: int("RATE_LIMIT_BASH_PER_MINUTE", 60),
     },
     executor: {
       kind: asExecutorKind(required("EXECUTOR_KIND", "mock")),

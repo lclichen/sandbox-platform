@@ -6,13 +6,16 @@
  * so tests can create() the app without binding a port.
  */
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
+import helmet from "helmet";
 import { existsSync } from "node:fs";
 import { resolve, extname, posix as posixPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { toHttpError, HttpError } from "./utils/errors.ts";
 import { logger } from "./utils/logger.ts";
+import { loadConfig } from "./config.ts";
 import { createDatabase, type Database } from "./db/driver.ts";
 import { getExecutor, type SandboxExecutorRef } from "./executors/index.ts";
+import { loginLimiter, refreshLimiter, bashLimiter } from "./middleware/rate-limit.ts";
 import { authRouter } from "./routes/auth.routes.ts";
 import { usersRouter } from "./routes/users.routes.ts";
 import { quotasRouter } from "./routes/quotas.routes.ts";
@@ -38,6 +41,29 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.use(express.json({ limit: "16mb" }));
   app.disable("x-powered-by");
 
+  // Security headers (P1-1). CSP tuned for the SPA: same-origin scripts, inline
+  // styles allowed (React style attributes), images may be inline data: URIs.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", "data:"],
+          connectSrc: ["'self'"],
+          fontSrc: ["'self'"],
+          objectSrc: ["'none'"],
+          baseUri: ["'self'"],
+          frameAncestors: ["'none'"],
+        },
+      },
+    }),
+  );
+  // Behind a reverse proxy, trust N hops so rate-limit keys use the real client IP.
+  const trustProxy = loadConfig().trustProxy;
+  if (trustProxy > 0) app.set("trust proxy", trustProxy);
+
   // Attach db + executor on every request.
   app.use((req: Request, _res: Response, next: NextFunction) => {
     req.app.locals.db = db;
@@ -53,6 +79,12 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   // Audit mutating requests. Mounted under /api/v1 so req.path is relative,
   // BEFORE the routers so res.on('finish') captures their outcome.
   app.use("/api/v1", auditMiddleware());
+
+  // Rate limiting (P1-1): brute-force / abuse surfaces, IP dimension.
+  // No-op middleware when disabled (default outside production).
+  app.use("/api/v1/auth/login", loginLimiter());
+  app.use("/api/v1/auth/refresh", refreshLimiter());
+  app.use("/api/v1/containers/:id/tools/bash", bashLimiter());
 
   // API routers. Each receives the db + executor via req.app.locals.
   app.use("/api/v1/auth", authRouter());
