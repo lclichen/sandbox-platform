@@ -9,6 +9,11 @@
  * Usage:
  *   npm run restore -- --in backups/backup-2026-...json
  *
+ * NOTE (P2-6): the JSON archive holds metadata only. If the backup was taken
+ * with `--include-files`, extract the companion `*-files.tar` back over
+ * OVERLAY_BASE_DIR / WORKSPACE_BASE_DIR (e.g. `tar --sparse -xSf
+ * backups/backup-...-files.tar -C /`) before or after restoring the metadata.
+ *
  * Env: DB_DIALECT, DB_SQLITE_PATH, DATABASE_URL (target database).
  */
 import { readFileSync } from "node:fs";

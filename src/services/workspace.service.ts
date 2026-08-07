@@ -242,6 +242,8 @@ export function createWorkspaceService(db: Database) {
       // Avoid path-component tricks: build the target as dirRel/filename and
       // let resolveInWorkspace's containment check do the final enforcement.
       const rel = dirRel ? `${dirRel.replace(/\/+$/, "")}/${filename}` : filename;
+      // P2-5: the upload must stay within the user's aggregate disk ceiling.
+      await quotas.assertAggregateDisk(userId, content.byteLength);
       await storage.writeFile(ws.user_id, id, rel, content);
       await refreshStats(id, ws.user_id);
       return { path: rel, size: content.byteLength };

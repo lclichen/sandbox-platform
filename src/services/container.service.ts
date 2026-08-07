@@ -292,6 +292,9 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
       }
       try {
         const snap = await executor.snapshot(handle, name);
+        // P2-5: the copy already happened on disk, but refuse to record it if
+        // it would push the user past their aggregate disk ceiling.
+        await quotas.assertAggregateDisk(userId, snap.sizeBytes);
         const result = await db.run(
           `INSERT INTO snapshots (container_id, name, description, overlay_path, size_bytes)
            VALUES (?, ?, ?, ?, ?)`,

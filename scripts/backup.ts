@@ -10,12 +10,18 @@
  * Usage:
  *   npm run backup                       # writes backups/<timestamp>.json
  *   npm run backup -- --out /path.json   # custom output path
+ *   npm run backup -- --include-files    # ALSO tar overlays + workspaces
+ *                                        # (P2-6: metadata alone is not a
+ *                                        #  restorable backup of user files)
  *
- * Env: DB_DIALECT, DB_SQLITE_PATH, DATABASE_URL (as usual).
+ * Env: DB_DIALECT, DB_SQLITE_PATH, DATABASE_URL, OVERLAY_BASE_DIR,
+ *      WORKSPACE_BASE_DIR (as usual).
  */
 import { writeFileSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { createDatabase, closeDatabase, decodeJson } from "../src/db/driver.ts";
+import { loadConfig } from "../src/config.ts";
 import { logger } from "../src/utils/logger.ts";
 
 // JSON columns: decode to logical JS values on read (backup) and re-encode on
@@ -73,10 +79,38 @@ export async function buildArchive(db: import("../src/db/driver.ts").Database): 
   };
 }
 
+/**
+ * Tar the file-storage directories (overlays + workspaces) into a companion
+ * archive (P2-6). `--sparse` preserves ext3 overlay holes (manual §4.2).
+ * Restore: extract the tar back over the same directories, then restore the
+ * JSON metadata (see restore.ts).
+ *
+ * NOTE: on win32 the MSYS tar mis-parses absolute `C:\...` paths as remote
+ * hosts; use relative paths (optionally with `cwd`) or POSIX-style config
+ * paths there. Linux deployments (production) accept absolute paths.
+ */
+export async function tarFileDirs(
+  outPath: string,
+  dirs: string[],
+  opts: { cwd?: string } = {},
+): Promise<void> {
+  if (dirs.length === 0) return;
+  const args = ["--sparse", "-cSf", outPath, ...dirs];
+  await new Promise<void>((resolveFn, reject) => {
+    const child = spawn("tar", args, { stdio: "inherit", cwd: opts.cwd });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolveFn();
+      else reject(new Error(`tar failed with exit code ${code}`));
+    });
+  });
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const outIdx = args.indexOf("--out");
   const outArg = outIdx >= 0 ? args[outIdx + 1] : undefined;
+  const includeFiles = args.includes("--include-files");
 
   const db = await createDatabase();
   try {
@@ -89,6 +123,17 @@ async function main() {
     mkdirSync(resolve(outPath, ".."), { recursive: true });
     writeFileSync(outPath, JSON.stringify(archive, null, 2));
     logger.info({ outPath, totalRows: Object.values(archive.tables).reduce((a, r) => a + r.length, 0) }, "backup written");
+
+    if (includeFiles) {
+      const config = loadConfig();
+      const fileDirs = [
+        config.executor.apptainer.overlayBaseDir,
+        config.executor.apptainer.workspaceBaseDir,
+      ];
+      const tarPath = resolve(outPath.replace(/\.json$/, "") + "-files.tar");
+      await tarFileDirs(tarPath, fileDirs);
+      logger.info({ tarPath, dirs: fileDirs }, "file storage tar written");
+    }
   } finally {
     await closeDatabase();
   }

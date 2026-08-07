@@ -160,6 +160,33 @@ export function createQuotaService(db: Database) {
       }
       return quota;
     },
+
+    /**
+     * Enforce the user's AGGREGATE disk usage (manual §5.3): sum of overlay +
+     * snapshot + workspace bytes must stay within max_disk_gb. `additionalBytes`
+     * accounts for the resource about to be created (snapshot copy / upload).
+     * Called before those creations commit.
+     */
+    async assertAggregateDisk(userId: number, additionalBytes = 0): Promise<void> {
+      const quota = await this.forUser(userId);
+      const row = await db.get<{ total: number | string }>(
+        `SELECT
+           COALESCE((SELECT SUM(o.size_bytes) FROM overlays o JOIN containers c ON o.container_id = c.id WHERE c.user_id = ?), 0)
+           + COALESCE((SELECT SUM(s.size_bytes) FROM snapshots s JOIN containers c ON s.container_id = c.id WHERE c.user_id = ?), 0)
+           + COALESCE((SELECT SUM(w.size_bytes) FROM workspaces w WHERE w.user_id = ?), 0) AS total`,
+        userId,
+        userId,
+        userId,
+      );
+      const used = Number(row?.total ?? 0);
+      const limitBytes = quota.max_disk_gb * 1024 * 1024 * 1024; // GiB convention
+      if (used + additionalBytes > limitBytes) {
+        throw new QuotaExceededError(
+          `Aggregate disk quota exceeded (${(used + additionalBytes) / (1024 * 1024 * 1024)}GB of ${quota.max_disk_gb}GB)`,
+          { used: used + additionalBytes, limit: limitBytes },
+        );
+      }
+    },
   };
 }
 
