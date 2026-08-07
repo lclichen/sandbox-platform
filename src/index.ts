@@ -6,6 +6,8 @@
 import { createApp } from "./app.ts";
 import { closeDatabase } from "./db/driver.ts";
 import { runMigrations } from "./db/migrate.ts";
+import { getExecutor } from "./executors/index.ts";
+import { createReaper } from "./scheduler/reaper.ts";
 import { logger } from "./utils/logger.ts";
 import { loadConfig, assertSecureProductionConfig } from "./config.ts";
 
@@ -29,12 +31,17 @@ async function main() {
   const applied = await runMigrations(db);
   if (applied.length > 0) logger.info({ applied }, "Migrations applied on startup.");
 
+  // Idle-container reaper: periodic auto-release of long-idle containers.
+  const reaper = config.reaper.enabled ? createReaper(db, await getExecutor()) : undefined;
+  reaper?.start();
+
   const server = app.listen(config.port, config.host, () => {
     logger.info({ host: config.host, port: config.port }, "Server listening.");
   });
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Shutting down...");
+    reaper?.stop();
     server.close();
     await closeDatabase();
     process.exit(0);

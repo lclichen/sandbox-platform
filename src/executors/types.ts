@@ -135,6 +135,11 @@ export interface ContainerRowForExecutor {
   node: string | null;
   overlay_path: string | null;
   status: string;
+  /** Owner id (reaper uses it to snapshot on the owner's behalf). */
+  user_id: number;
+  /** Last start timestamp (reaper's idle anchor). */
+  last_started_at?: string | null;
+  last_stopped_at?: string | null;
 }
 
 export function handleFromRow(row: ContainerRowForExecutor): ContainerHandle {

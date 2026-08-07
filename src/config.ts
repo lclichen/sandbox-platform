@@ -23,6 +23,12 @@ function int(name: string, fallback: number): number {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function bool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  return raw === "true" || raw === "1";
+}
+
 export type DbDialect = "sqlite" | "postgresql";
 export type ExecutorKind = "mock" | "ssh" | "apptainer-cli";
 
@@ -70,6 +76,14 @@ export interface AppConfig {
       workspaceBaseDir: string;
     };
   };
+  reaper: {
+    enabled: boolean;
+    intervalMinutes: number;
+    idleAutoStopHours: number;
+    autoStopSnapshot: boolean;
+    snapshotTier: string;
+    auditRetentionDays: number;
+  };
 }
 
 let cached: AppConfig | undefined;
@@ -109,6 +123,14 @@ export function loadConfig(): AppConfig {
         imageBaseDir: required("IMAGE_BASE_DIR", "./data/images"),
         workspaceBaseDir: required("WORKSPACE_BASE_DIR", "./data/workspaces"),
       },
+    },
+    reaper: {
+      enabled: bool("REAPER_ENABLED", false),
+      intervalMinutes: int("REAPER_INTERVAL_MINUTES", 30),
+      idleAutoStopHours: int("IDLE_AUTO_STOP_HOURS", 168),
+      autoStopSnapshot: bool("IDLE_AUTO_STOP_SNAPSHOT", true),
+      snapshotTier: required("IDLE_AUTO_STOP_SNAPSHOT_TIER", "auto"),
+      auditRetentionDays: int("AUDIT_RETENTION_DAYS", 90),
     },
   };
   return cached;

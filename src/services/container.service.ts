@@ -20,6 +20,7 @@ import {
   InvalidStateError,
   BadRequestError,
 } from "../utils/errors.ts";
+import { logger } from "../utils/logger.ts";
 
 export interface ContainerRow {
   id: number;
@@ -39,6 +40,9 @@ export interface ContainerRow {
   updated_at: string;
   last_started_at: string | null;
   last_stopped_at: string | null;
+  /** Set by the reaper when it auto-released an idle container (snapshot + stop). */
+  auto_stopped: boolean | number;
+  auto_stopped_at: string | null;
 }
 
 export interface ContainerPublic extends Omit<ContainerRow, "instance_name" | "overlay_path" | "node"> {
@@ -183,6 +187,25 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
       const row = await this.requireOwned(id, userId, isAdmin);
       if (row.status === "running") return row;
       if (row.status === "destroyed") throw new InvalidStateError("Cannot start a destroyed container");
+      // Reaper semantics: an auto-released container resumes from its most
+      // recent auto-tier snapshot (the state at release time) instead of the
+      // current overlay, then the marker is cleared.
+      if (row.auto_stopped && row.status === "stopped") {
+        const snap = await db.get<{ id: number; name: string; overlay_path: string }>(
+          "SELECT id, name, overlay_path FROM snapshots WHERE container_id = ? AND name LIKE ? ORDER BY id DESC LIMIT 1",
+          id,
+          "auto-%",
+        );
+        await db.run(
+          "UPDATE containers SET auto_stopped = 0, auto_stopped_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          id,
+        );
+        if (snap) {
+          await this._restoreFromSnapshot(row, snap);
+          return (await this.requireById(id))!;
+        }
+        // No snapshot to resume from — fall through to a plain overlay start.
+      }
       const image = await images.requireById(row.image_id);
       const handle = await executor.create({
         id: row.instance_name!,
@@ -230,7 +253,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
       );
     },
 
-    async snapshot(id: number, userId: number, name: string, description?: string, isAdmin = false): Promise<{ id: number; name: string; sizeBytes: number }> {
+    async snapshot(id: number, userId: number, name: string, description?: string, isAdmin = false, opts: { restartAfter?: boolean } = {}): Promise<{ id: number; name: string; sizeBytes: number }> {
       const row = await this.requireOwned(id, userId, isAdmin);
       if (row.status === "destroyed") throw new InvalidStateError("Cannot snapshot a destroyed container");
       const quota = await quotas.forUser(userId);
@@ -246,18 +269,39 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
       const dup = await db.get<{ id: number }>("SELECT id FROM snapshots WHERE container_id = ? AND name = ?", id, name);
       if (dup) throw new BadRequestError(`Snapshot name '${name}' already exists for this container`);
 
+      // Stop-Then-Copy (manual §4.1): a running overlay may be mid-write, so we
+      // quiesce the instance, copy the overlay, then bring it back up. The
+      // reaper passes restartAfter:false to leave the instance stopped.
       const handle = handleFromRow(row);
-      const snap = await executor.snapshot(handle, name);
-      const result = await db.run(
-        `INSERT INTO snapshots (container_id, name, description, overlay_path, size_bytes)
-         VALUES (?, ?, ?, ?, ?)`,
-        id,
-        name,
-        description ?? null,
-        snap.overlayPath,
-        snap.sizeBytes,
-      );
-      return { id: Number(result.lastInsertRowid), name, sizeBytes: snap.sizeBytes };
+      const wasRunning = row.status === "running";
+      if (wasRunning) {
+        try {
+          await executor.stop(handle);
+        } catch (err) {
+          logger.warn({ id, err: (err as Error).message }, "snapshot: pre-copy stop failed; copying anyway");
+        }
+      }
+      try {
+        const snap = await executor.snapshot(handle, name);
+        const result = await db.run(
+          `INSERT INTO snapshots (container_id, name, description, overlay_path, size_bytes)
+           VALUES (?, ?, ?, ?, ?)`,
+          id,
+          name,
+          description ?? null,
+          snap.overlayPath,
+          snap.sizeBytes,
+        );
+        return { id: Number(result.lastInsertRowid), name, sizeBytes: snap.sizeBytes };
+      } finally {
+        if (wasRunning && opts.restartAfter !== false) {
+          try {
+            await executor.start(handle);
+          } catch (err) {
+            logger.warn({ id, err: (err as Error).message }, "snapshot: restart after copy failed");
+          }
+        }
+      }
     },
 
     async listSnapshots(id: number, userId: number, isAdmin = false) {
@@ -276,6 +320,12 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
         id,
       );
       if (!snap) throw new NotFoundError("Snapshot", snapshotId);
+      await this._restoreFromSnapshot(row, snap);
+      return (await this.requireById(id))!;
+    },
+
+    /** Shared restore path: quiesce the current instance, restore overlay, start. */
+    async _restoreFromSnapshot(row: ContainerRow, snap: { id: number; name: string; overlay_path: string }): Promise<void> {
       const image = await images.requireById(row.image_id);
       // Stop current instance if running, then restore from snapshot overlay.
       if (row.status === "running") {
@@ -300,9 +350,8 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
         "UPDATE containers SET status = 'running', overlay_path = ?, node = ?, last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         handle.overlayPath,
         handle.node,
-        id,
+        row.id,
       );
-      return (await this.requireById(id))!;
     },
 
     async deleteSnapshot(id: number, snapshotId: number, userId: number, isAdmin = false): Promise<void> {
