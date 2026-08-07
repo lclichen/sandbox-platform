@@ -7,7 +7,7 @@
  * commands run locally via child_process.
  */
 import { spawn } from "node:child_process";
-import { mkdir, rm, cp } from "node:fs/promises";
+import { mkdir, rm, cp, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import type {
   SandboxExecutor,
@@ -49,7 +49,9 @@ export class ApptainerCliExecutor implements SandboxExecutor {
 
   async create(req: CreateRequest): Promise<ContainerHandle> {
     const overlayPath = this.overlayPathFor(req.id);
-    await mkdir(overlayPath, { recursive: true });
+    // P1-6: bounded ext3 overlay when possible (manual §2.2); fall back to a
+    // directory overlay if `apptainer overlay create` is unavailable.
+    await this.ensureOverlay(overlayPath, req.diskGb);
     // Seed the overlay's /workspace from a host-side workspace directory. The
     // overlay is a directory this executor manages locally, so a plain cp lands
     // the files where the container will see them mounted.
@@ -72,11 +74,35 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       req.imagePath,
       req.id,
     ]);
-    return { id: req.id, node: "local", overlayPath, running: true };
+    return { id: req.id, node: "local", overlayPath, running: true, imagePath: req.imagePath };
+  }
+
+  /** Create a sparse ext3 overlay sized to diskGb (MiB); fall back to a dir. */
+  private async ensureOverlay(overlayPath: string, diskGb: number): Promise<void> {
+    try {
+      await stat(overlayPath);
+      return; // exists
+    } catch {
+      // missing — create below
+    }
+    if (diskGb > 0) {
+      const sizeMiB = Math.max(1, Math.round(diskGb * 1024));
+      const created = await this.runCli(["overlay", "create", "--size", String(sizeMiB), overlayPath]);
+      if (created.exitCode === 0) return;
+      logger.warn(
+        { overlayPath, err: created.stderr.trim() || "overlay create failed" },
+        "ApptainerCliExecutor: ext3 overlay create failed; falling back to directory overlay (unbounded)",
+      );
+    }
+    await mkdir(overlayPath, { recursive: true });
   }
 
   async start(handle: ContainerHandle): Promise<void> {
-    await this.runCli(["instance", "start", handle.overlayPath, handle.id]);
+    const args = ["instance", "start", "--overlay", handle.overlayPath];
+    if (handle.imagePath) args.push(handle.imagePath);
+    else args.push(handle.overlayPath);
+    args.push(handle.id);
+    await this.runCli(args);
     handle.running = true;
   }
 
@@ -103,7 +129,10 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await mkdir(dirname(dst), { recursive: true });
     await rm(dst, { recursive: true, force: true });
     await cp(handle.overlayPath, dst, { recursive: true });
-    return { id: `${handle.id}:${name}`, overlayPath: dst, sizeBytes: 0 };
+    // P3-2: report the real copied size (mirrors ssh-executor.ts).
+    const sizeRes = await this.runCli(["du", "-sb", dst]);
+    const sizeBytes = Number.parseInt(sizeRes.stdout.trim().split(/\s+/)[0] ?? "0", 10) || 0;
+    return { id: `${handle.id}:${name}`, overlayPath: dst, sizeBytes };
   }
 
   async restore(snapshot: SnapshotHandle, req: CreateRequest): Promise<ContainerHandle> {
@@ -118,7 +147,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       req.imagePath,
       req.id,
     ]);
-    return { id: req.id, node: "local", overlayPath, running: true };
+    return { id: req.id, node: "local", overlayPath, running: true, imagePath: req.imagePath };
   }
 
   async readFile(handle: ContainerHandle, path: string): Promise<Buffer> {
@@ -128,7 +157,9 @@ export class ApptainerCliExecutor implements SandboxExecutor {
 
   async writeFile(handle: ContainerHandle, path: string, content: Buffer): Promise<void> {
     const b64 = content.toString("base64");
-    await this.runCli(["exec", handle.id, "sh", "-c", `mkdir -p "$(dirname ${path})" && echo '${b64}' | base64 -d > ${path}`]);
+    // P3-2: shell-quote the path so spaces/quotes in filenames cannot inject.
+    const quoted = shellQuote(path);
+    await this.runCli(["exec", handle.id, "sh", "-c", `mkdir -p "$(dirname -- ${quoted})" && echo '${b64}' | base64 -d > ${quoted}`]);
   }
 
   async access(handle: ContainerHandle, path: string): Promise<void> {
@@ -199,4 +230,9 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       });
     });
   }
+}
+
+/** Quote a string for POSIX sh (single-quote escaping). */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }

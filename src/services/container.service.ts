@@ -296,7 +296,19 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
       } finally {
         if (wasRunning && opts.restartAfter !== false) {
           try {
-            await executor.start(handle);
+            // Resume from the existing overlay via create (which carries the
+            // image path) — executor.start(handle) cannot rebuild the full
+            // instance-start command for SSH/CLI from a DB-derived handle.
+            const image = await images.requireById(row.image_id);
+            await executor.create({
+              id: row.instance_name!,
+              imagePath: image.sif_path,
+              cpu: row.cpu,
+              memoryMb: row.memory_mb,
+              diskGb: row.disk_gb,
+              overlayPath: handle.overlayPath,
+              env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
+            });
           } catch (err) {
             logger.warn({ id, err: (err as Error).message }, "snapshot: restart after copy failed");
           }

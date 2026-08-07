@@ -31,6 +31,8 @@ export interface ContainerHandle {
   readonly overlayPath: string;
   /** Whether the instance is currently running. */
   running: boolean;
+  /** Base image SIF path (needed to rebuild `instance start` from a handle). */
+  imagePath?: string;
 }
 
 export interface SnapshotHandle {

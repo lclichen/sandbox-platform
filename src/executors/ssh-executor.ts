@@ -5,8 +5,13 @@
  * `apptainer exec <instance> <cmd>` / `apptainer instance start|stop` etc.
  * File operations are implemented as base64-piped shell commands (robust
  * against binary content and quoting), mirroring the pattern in pi's ssh.ts
- * example. The overlay (ext3 or directory) is a host path the SSH user has
- * access to; snapshot copies it on the remote side.
+ * example.
+ *
+ * Overlay: a sparse ext3 image created with `apptainer overlay create --size
+ * <diskGb*1024>` enforces the per-container disk ceiling (P1-6, manual §2.2),
+ * with a directory-overlay fallback if creation fails. Instances run with
+ * `--contain --no-mount hostfs,cwd` so the guest cannot see the SSH user's
+ * host filesystem (P1-7).
  *
  * This executor is only exercised on Linux deployments; on win32 it reports
  * unavailable so the factory falls back.
@@ -75,8 +80,9 @@ export class SshExecutor implements SandboxExecutor {
     const host = req.node ?? this.defaultHost!;
     await this.connect(host);
     const overlayPath = req.overlayPath ?? `/srv/apptainer/overlays/${req.id}.ext3`;
-    // Create the overlay if missing (directory-style overlay for simplicity).
-    await this.execRemote(`mkdir -p ${shellQuote(overlayPath)}`);
+    // P1-6: enforce the disk ceiling at the overlay layer (sparse ext3 image of
+    // diskGb*1024 MiB, manual §2.2); falls back to a directory overlay.
+    await this.ensureOverlay(overlayPath, req.diskGb);
 
     // If a workspace seed directory is provided, push it to the remote host and
     // bind-mount it at /workspace inside the container. The remote staging path
@@ -89,18 +95,60 @@ export class SshExecutor implements SandboxExecutor {
       bindOpt = `--bind ${shellQuote(remoteSeed)}:/workspace`;
     }
 
-    // Start the instance.
-    const cpuOpt = req.cpu ? `--cpus ${req.cpu}` : "";
-    const memOpt = req.memoryMb ? `--memory ${req.memoryMb}M` : "";
+    await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb, bindOpt);
+    return { id: req.id, node: host, overlayPath, running: true, imagePath: req.imagePath };
+  }
+
+  /**
+   * Ensure the overlay exists, bounded to diskGb when possible. Prefers a
+   * sparse ext3 image created via `apptainer overlay create --size <MiB>`
+   * (manual §2.2); falls back to a plain directory overlay (unbounded but
+   * functional) when overlay creation fails on the remote host.
+   */
+  private async ensureOverlay(overlayPath: string, diskGb: number): Promise<void> {
+    const exists = await this.execRemote(`test -e ${shellQuote(overlayPath)} && echo yes || echo no`);
+    if (exists.stdout.trim() === "yes") return;
+    if (diskGb > 0) {
+      const sizeMiB = Math.max(1, Math.round(diskGb * 1024));
+      const created = await this.execRemote(
+        `apptainer overlay create --size ${sizeMiB} ${shellQuote(overlayPath)} 2>&1`,
+      );
+      if (created.code === 0) return;
+      logger.warn(
+        { overlayPath, err: created.stderr.trim() || "overlay create failed" },
+        "SshExecutor: ext3 overlay create failed; falling back to directory overlay (unbounded)",
+      );
+    }
+    await this.execRemote(`mkdir -p ${shellQuote(overlayPath)}`);
+  }
+
+  /**
+   * P1-7: run instances with host isolation (no hostfs / no cwd mount) so the
+   * guest cannot see or write the SSH user's host filesystem.
+   */
+  private async startInstance(
+    overlayPath: string,
+    imagePath: string,
+    id: string,
+    cpu?: number,
+    memoryMb?: number,
+    extraOpts = "",
+  ): Promise<void> {
+    const cpuOpt = cpu ? `--cpus ${cpu}` : "";
+    const memOpt = memoryMb ? `--memory ${memoryMb}M` : "";
     await this.execRemote(
-      `apptainer instance start ${cpuOpt} ${memOpt} --overlay ${shellQuote(overlayPath)} ${bindOpt} ${shellQuote(req.imagePath)} ${shellQuote(req.id)}`,
+      `apptainer instance start --contain --no-mount hostfs,cwd ${cpuOpt} ${memOpt} --overlay ${shellQuote(overlayPath)} ${extraOpts} ${shellQuote(imagePath)} ${shellQuote(id)}`,
     );
-    return { id: req.id, node: host, overlayPath, running: true };
   }
 
   async start(handle: ContainerHandle): Promise<void> {
     await this.connect(handle.node);
-    await this.execRemote(`apptainer instance start ${shellQuote(handle.overlayPath)} ${shellQuote(handle.id)}`);
+    // The handle carries the image path so a resume rebuilds a valid start
+    // command; fall back to the overlay path as the image for legacy handles.
+    const imageArg = handle.imagePath ? shellQuote(handle.imagePath) : shellQuote(handle.overlayPath);
+    await this.execRemote(
+      `apptainer instance start --contain --no-mount hostfs,cwd --overlay ${shellQuote(handle.overlayPath)} ${imageArg} ${shellQuote(handle.id)}`,
+    );
     handle.running = true;
   }
 
@@ -119,7 +167,8 @@ export class SshExecutor implements SandboxExecutor {
   async snapshot(handle: ContainerHandle, name: string): Promise<SnapshotHandle> {
     await this.connect(handle.node);
     const dst = `${handle.overlayPath}.snap-${name}`;
-    await this.execRemote(`rm -rf ${shellQuote(dst)}; cp -a ${shellQuote(handle.overlayPath)} ${shellQuote(dst)}`);
+    // --sparse=always keeps ext3 images sparse on copy (manual §4.2).
+    await this.execRemote(`rm -rf ${shellQuote(dst)}; cp -a --sparse=always ${shellQuote(handle.overlayPath)} ${shellQuote(dst)}`);
     const sizeRes = await this.execRemote(`du -sb ${shellQuote(dst)} | cut -f1`);
     return {
       id: `${handle.id}:${name}`,
@@ -132,13 +181,9 @@ export class SshExecutor implements SandboxExecutor {
     const host = req.node ?? this.defaultHost!;
     await this.connect(host);
     const overlayPath = req.overlayPath ?? `/srv/apptainer/overlays/${req.id}.ext3`;
-    await this.execRemote(`rm -rf ${shellQuote(overlayPath)}; cp -a ${shellQuote(snapshot.overlayPath)} ${shellQuote(overlayPath)}`);
-    const cpuOpt = req.cpu ? `--cpus ${req.cpu}` : "";
-    const memOpt = req.memoryMb ? `--memory ${req.memoryMb}M` : "";
-    await this.execRemote(
-      `apptainer instance start ${cpuOpt} ${memOpt} --overlay ${shellQuote(overlayPath)} ${shellQuote(req.imagePath)} ${shellQuote(req.id)}`,
-    );
-    return { id: req.id, node: host, overlayPath, running: true };
+    await this.execRemote(`rm -rf ${shellQuote(overlayPath)}; cp -a --sparse=always ${shellQuote(snapshot.overlayPath)} ${shellQuote(overlayPath)}`);
+    await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb);
+    return { id: req.id, node: host, overlayPath, running: true, imagePath: req.imagePath };
   }
 
   async readFile(handle: ContainerHandle, path: string): Promise<Buffer> {
