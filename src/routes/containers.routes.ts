@@ -12,6 +12,14 @@
  *   POST   /:id/snapshots/:sid/restore   restore from snapshot
  *   DELETE /:id/snapshots/:sid  delete a snapshot
  *   GET    /:id/connect         return connection info (instance + node)
+ *
+ * v1 semantics (P3-5): `start` does NOT re-seed the workspace — seeding
+ * happens only at create time (CreateRequest.seedFromPath), so in-container
+ * edits are never overwritten by a restart.
+ *
+ * Idempotency (P3-4): POST / accepts an optional `Idempotency-Key` header; a
+ * retry with the same key returns the original 201 response (5-minute TTL,
+ * in-memory, scoped per user).
  */
 import { Router, type Request } from "express";
 import { getDb, getExecutorFromReq } from "../app.ts";
@@ -33,6 +41,23 @@ function actor(req: Request): { id: number; isAdmin: boolean } {
   return { id: user.sub, isAdmin: user.role === "admin" };
 }
 
+// ---- idempotency (P3-4): in-memory cache for POST /, keyed (userId, key) ----
+
+const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
+const idempotencyCache = new Map<string, { expiresAt: number; body: unknown }>();
+
+function idempotencyKey(req: Request): string | null {
+  const key = req.headers["idempotency-key"];
+  if (typeof key !== "string" || key.length === 0 || key.length > 128) return null;
+  return key;
+}
+
+function sweepIdempotencyCache(now = Date.now()): void {
+  for (const [key, entry] of idempotencyCache) {
+    if (entry.expiresAt < now) idempotencyCache.delete(key);
+  }
+}
+
 export function containersRouter(): Router {
   const router = Router();
   router.use(requireAuth());
@@ -40,10 +65,27 @@ export function containersRouter(): Router {
   router.post("/", (req, res, next) => {
     const body = validate(createContainerSchema, req.body);
     const a = actor(req);
+    const key = idempotencyKey(req);
+    const cacheKey = key ? `${a.id}:${key}` : null;
+    if (cacheKey) {
+      sweepIdempotencyCache();
+      const hit = idempotencyCache.get(cacheKey);
+      if (hit) {
+        res.status(201).json(hit.body);
+        return;
+      }
+    }
     const svc = createContainerService(getDb(req), getExecutorFromReq(req));
     svc
       .create(currentUserId(req), body)
-      .then((row) => res.status(201).json(svc._toPublic(row, a.isAdmin)))
+      .then((row) => {
+        const payload = svc._toPublic(row, a.isAdmin);
+        // Cache success only — a failed attempt may succeed on retry.
+        if (cacheKey) {
+          idempotencyCache.set(cacheKey, { expiresAt: Date.now() + IDEMPOTENCY_TTL_MS, body: payload });
+        }
+        res.status(201).json(payload);
+      })
       .catch(next);
   });
 

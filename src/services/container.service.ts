@@ -200,8 +200,8 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
       // recent auto-tier snapshot (the state at release time) instead of the
       // current overlay, then the marker is cleared.
       if (row.auto_stopped && row.status === "stopped") {
-        const snap = await db.get<{ id: number; name: string; overlay_path: string }>(
-          "SELECT id, name, overlay_path FROM snapshots WHERE container_id = ? AND name LIKE ? ORDER BY id DESC LIMIT 1",
+        const snap = await db.get<{ id: number; name: string; overlay_path: string; size_bytes: number }>(
+          "SELECT id, name, overlay_path, size_bytes FROM snapshots WHERE container_id = ? AND name LIKE ? ORDER BY id DESC LIMIT 1",
           id,
           "auto-%",
         );
@@ -304,6 +304,21 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
           snap.overlayPath,
           snap.sizeBytes,
         );
+        // P3-1 overlay maintenance: link the snapshot to the current overlay
+        // row and refresh that row's size_bytes (a snapshot is a copy of the
+        // overlay, so its size approximates the overlay's usage).
+        const overlayRow = await db.get<{ id: number }>(
+          "SELECT id FROM overlays WHERE container_id = ? AND is_current = 1 ORDER BY id DESC LIMIT 1",
+          id,
+        );
+        if (overlayRow) {
+          await db.run(
+            "UPDATE snapshots SET overlay_id = ? WHERE id = ?",
+            overlayRow.id,
+            Number(result.lastInsertRowid),
+          );
+          await db.run("UPDATE overlays SET size_bytes = ? WHERE id = ?", snap.sizeBytes, overlayRow.id);
+        }
         return { id: Number(result.lastInsertRowid), name, sizeBytes: snap.sizeBytes };
       } finally {
         if (wasRunning && opts.restartAfter !== false) {
@@ -338,8 +353,8 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
 
     async restoreSnapshot(id: number, snapshotId: number, userId: number, isAdmin = false): Promise<ContainerRow> {
       const row = await this.requireOwned(id, userId, isAdmin);
-      const snap = await db.get<{ id: number; name: string; overlay_path: string }>(
-        "SELECT id, name, overlay_path FROM snapshots WHERE id = ? AND container_id = ?",
+      const snap = await db.get<{ id: number; name: string; overlay_path: string; size_bytes: number }>(
+        "SELECT id, name, overlay_path, size_bytes FROM snapshots WHERE id = ? AND container_id = ?",
         snapshotId,
         id,
       );
@@ -349,7 +364,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
     },
 
     /** Shared restore path: quiesce the current instance, restore overlay, start. */
-    async _restoreFromSnapshot(row: ContainerRow, snap: { id: number; name: string; overlay_path: string }): Promise<void> {
+    async _restoreFromSnapshot(row: ContainerRow, snap: { id: number; name: string; overlay_path: string; size_bytes?: number }): Promise<void> {
       const image = await images.requireById(row.image_id);
       // Stop current instance if running, then restore from snapshot overlay.
       if (row.status === "running") {
@@ -375,6 +390,15 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
         handle.overlayPath,
         handle.node,
         row.id,
+      );
+      // P3-1: the restored overlay is now the current one; demote previous
+      // overlay rows and record the new path.
+      await db.run("UPDATE overlays SET is_current = 0 WHERE container_id = ?", row.id);
+      await db.run(
+        "INSERT INTO overlays (container_id, path, is_current, size_bytes) VALUES (?, ?, 1, ?)",
+        row.id,
+        handle.overlayPath,
+        snap.size_bytes ?? 0,
       );
     },
 

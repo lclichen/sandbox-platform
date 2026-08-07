@@ -258,4 +258,97 @@ describe("container lifecycle", () => {
       .send({ path: "pre.txt" });
     expect(Buffer.from(read.body.contentBase64, "base64").toString("utf8")).toBe("snapshot-time");
   });
+
+  it("dedupes container creation with an Idempotency-Key", async () => {
+    ctx = await setupTestApp();
+    const admin = await adminToken(ctx);
+    const imageId = await firstImageId(ctx, admin);
+    const userToken = await createUserAndLogin(ctx, "idemuser");
+
+    const payload = { imageId, name: "idem-box" };
+    const first = await ctx
+      .request()
+      .post("/api/v1/containers")
+      .set("Authorization", `Bearer ${userToken}`)
+      .set("Idempotency-Key", "create-idem-box-1")
+      .send(payload);
+    expect(first.status).toBe(201);
+
+    // Retry with the same key returns the ORIGINAL response, not a new row.
+    const retry = await ctx
+      .request()
+      .post("/api/v1/containers")
+      .set("Authorization", `Bearer ${userToken}`)
+      .set("Idempotency-Key", "create-idem-box-1")
+      .send(payload);
+    expect(retry.status).toBe(201);
+    expect(retry.body.id).toBe(first.body.id);
+
+    const list = await ctx
+      .request()
+      .get("/api/v1/containers")
+      .set("Authorization", `Bearer ${userToken}`);
+    const idemBoxes = list.body.containers.filter((c: { name: string }) => c.name === "idem-box");
+    expect(idemBoxes.length).toBe(1);
+
+    // A different key creates a separate container.
+    const other = await ctx
+      .request()
+      .post("/api/v1/containers")
+      .set("Authorization", `Bearer ${userToken}`)
+      .set("Idempotency-Key", "create-idem-box-2")
+      .send(payload);
+    expect(other.status).toBe(201);
+    expect(other.body.id).not.toBe(first.body.id);
+  });
+
+  it("maintains overlay rows on snapshot and restore", async () => {
+    ctx = await setupTestApp();
+    const admin = await adminToken(ctx);
+    const imageId = await firstImageId(ctx, admin);
+    const userToken = await createUserAndLogin(ctx, "overlayuser");
+
+    const create = await ctx
+      .request()
+      .post("/api/v1/containers")
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ imageId, name: "overlay-box" });
+    const cid = create.body.id;
+
+    const snap = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/snapshots`)
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ name: "v1" });
+    expect(snap.status).toBe(201);
+
+    // Snapshot is linked to the current overlay row, and size_bytes refreshed.
+    const snapRow = await ctx.db.get<{ overlay_id: number | null; size_bytes: number }>(
+      "SELECT overlay_id, size_bytes FROM snapshots WHERE id = ?",
+      snap.body.id,
+    );
+    expect(snapRow!.overlay_id).not.toBeNull();
+    expect(Number(snapRow!.size_bytes)).toBeGreaterThan(0);
+    const overlayRow = await ctx.db.get<{ size_bytes: number }>(
+      "SELECT size_bytes FROM overlays WHERE id = ?",
+      snapRow!.overlay_id,
+    );
+    expect(Number(overlayRow!.size_bytes)).toBeGreaterThan(0);
+
+    // Restore demotes the old overlay row and records the new path as current.
+    await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/snapshots/${snap.body.id}/restore`)
+      .set("Authorization", `Bearer ${userToken}`);
+    const currents = await ctx.db.all<{ path: string }>(
+      "SELECT path FROM overlays WHERE container_id = ? AND is_current = 1",
+      cid,
+    );
+    expect(currents.length).toBe(1);
+    const demoted = await ctx.db.get<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM overlays WHERE container_id = ? AND is_current = 0",
+      cid,
+    );
+    expect(Number(demoted!.c)).toBeGreaterThanOrEqual(1);
+  });
 });
