@@ -1,0 +1,103 @@
+/**
+ * Response types mirroring the sandbox-platform REST API.
+ *
+ * Kept in sync with src/routes/schemas and the service `toPublic` shapes.
+ * Field names match the backend JSON exactly (snake_case for DB-derived rows).
+ */
+
+export interface UserPublic {
+  id: number;
+  username: string;
+  email: string | null;
+  role: "admin" | "user";
+  quota_id: number | null;
+  status: "active" | "disabled";
+  created_at: string;
+  last_login_at: string | null;
+}
+
+export interface QuotaRow {
+  id: number;
+  name: string;
+  description: string | null;
+  max_containers: number;
+  max_cpu_cores: number;
+  max_memory_mb: number;
+  max_disk_gb: number;
+  max_snapshots_per_container: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ImageRow {
+  id: number;
+  name: string;
+  display_name: string;
+  sif_path: string;
+  description: string | null;
+  is_public: boolean;
+  tags: string[] | null;
+  default_resources: { cpu: number; memoryMb: number; diskGb: number } | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContainerPublic {
+  id: number;
+  user_id: number;
+  image_id: number;
+  name: string;
+  instance_name: string | null;
+  status: string;
+  cpu: number;
+  memory_mb: number;
+  disk_gb: number;
+  error_message: string | null;
+  created_at: string;
+  last_started_at: string | null;
+  last_stopped_at: string | null;
+}
+
+export interface SnapshotRow {
+  id: number;
+  name: string;
+  description: string | null;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface LogRow {
+  id: number;
+  user_id: number | null;
+  action: string;
+  resource_type: string;
+  resource_id: number | null;
+  detail: unknown;
+  ip: string | null;
+  status: "success" | "failure";
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface DashboardData {
+  users: number;
+  images: number;
+  runningContainers: number;
+  recentFailures24h: number;
+  containersByStatus: Record<string, number>;
+  executor: string;
+  dialect: string;
+}
+
+export interface LoginResponse {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  user: UserPublic;
+}
+
+export interface ApiErrorBody {
+  code: string;
+  message: string;
+  details?: unknown;
+}

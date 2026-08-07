@@ -1,0 +1,44 @@
+{
+  "name": "sandbox-platform",
+  "version": "0.1.0",
+  "description": "Centralized Apptainer-based cloud-native sandbox management platform",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "start": "node --experimental-transform-types --no-warnings=ExperimentalWarning src/index.ts",
+    "dev": "node --watch --experimental-transform-types --no-warnings=ExperimentalWarning src/index.ts",
+    "migrate": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/migrate.ts",
+    "migrate:rollback": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/migrate.ts rollback",
+    "seed": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/migrate.ts seed",
+    "backup": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/backup.ts",
+    "restore": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/restore.ts",
+    "migrate-db": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/migrate-db.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest --run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "bcrypt": "5.1.1",
+    "dotenv": "16.4.7",
+    "express": "4.21.2",
+    "jsonwebtoken": "9.0.2",
+    "nanoid": "5.0.9",
+    "node-ssh": "13.2.0",
+    "pg": "8.13.1",
+    "pino": "9.5.0",
+    "pino-pretty": "13.0.0",
+    "zod": "3.24.1"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "5.0.2",
+    "@types/express": "4.17.21",
+    "@types/jsonwebtoken": "9.0.7",
+    "@types/node": "22.10.5",
+    "@types/pg": "8.11.10",
+    "supertest": "7.0.0",
+    "vitest": "2.1.8"
+  }
+}

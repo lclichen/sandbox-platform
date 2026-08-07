@@ -1,0 +1,158 @@
+/**
+ * Sandbox executor contract.
+ *
+ * The executor is the platform's abstraction over the actual container runtime
+ * (Apptainer instance + overlay, or a stand-in for local development). It owns
+ * all interaction with the container: lifecycle (create/start/stop/destroy),
+ * field-recovery (snapshot/restore), and the file/command operations the
+ * `tools` routes relay from pi clients.
+ *
+ * Three implementations exist behind one interface, selectable via config:
+ *   - MockExecutor:       local filesystem + child_process; works everywhere,
+ *                          default for development on win32.
+ *   - SshExecutor:        SSH into the host node and run `apptainer exec
+ *                          <instance> <cmd>`; preferred in production.
+ *   - ApptainerCliExecutor: the platform process spawns `apptainer` directly;
+ *                          fallback when SSH is unavailable.
+ *
+ * Handles are opaque to the caller (just carry an id + metadata the executor
+ * produced). The executor keeps any internal mapping it needs.
+ */
+import type { Database, SqlValue } from "../db/driver.ts";
+
+export type ExecutorKind = "mock" | "ssh" | "apptainer-cli";
+
+export interface ContainerHandle {
+  /** Stable id, stored as containers.instance_name (executor-scoped). */
+  readonly id: string;
+  /** Execution node identifier (host) for diagnostics. */
+  readonly node: string;
+  /** Overlay path the executor manages (overlay_path column). */
+  readonly overlayPath: string;
+  /** Whether the instance is currently running. */
+  running: boolean;
+}
+
+export interface SnapshotHandle {
+  readonly id: string;
+  readonly overlayPath: string;
+  sizeBytes: number;
+}
+
+export interface CreateRequest {
+  /** Executor-scoped stable id (caller-generated, e.g. `sb-<nanoid>`). */
+  id: string;
+  /** Base image SIF path. */
+  imagePath: string;
+  /** CPU cores requested. */
+  cpu: number;
+  /** Memory in MB. */
+  memoryMb: number;
+  /** Disk ceiling in GB (overlay size). */
+  diskGb: number;
+  /** Environment overrides. */
+  env?: Record<string, string>;
+  /** Per-container node override (SSH executor); falls back to config default. */
+  node?: string;
+}
+
+export interface FileStat {
+  isDirectory: boolean;
+  isFile: boolean;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface ExecOptions {
+  cwd?: string;
+  timeout?: number; // seconds
+  env?: Record<string, string>;
+  signal?: AbortSignal;
+  /** Streaming callback for stdout+stderr chunks (Buffer). */
+  onData?: (chunk: Buffer) => void;
+}
+
+export interface ExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+export interface ExecStream {
+  /** Cancel the running process. */
+  kill(): void;
+}
+
+export interface SandboxExecutor {
+  readonly kind: ExecutorKind;
+  /** Probe whether the executor can operate (binary present, ssh reachable, ...). */
+  isAvailable(): Promise<boolean>;
+  /** Create + start an instance with a fresh overlay. */
+  create(req: CreateRequest): Promise<ContainerHandle>;
+  /** Start a stopped instance (re-attach overlay). */
+  start(handle: ContainerHandle): Promise<void>;
+  /** Stop a running instance gracefully (overlay retained). */
+  stop(handle: ContainerHandle): Promise<void>;
+  /** Destroy the instance AND its overlay (irreversible). */
+  destroy(handle: ContainerHandle): Promise<void>;
+  /** Copy the current overlay into a named snapshot (field-recovery mechanism). */
+  snapshot(handle: ContainerHandle, name: string): Promise<SnapshotHandle>;
+  /** Re-create an instance from a snapshot's overlay. */
+  restore(snapshot: SnapshotHandle, req: CreateRequest): Promise<ContainerHandle>;
+
+  // ---- file/command operations (relayed by the tools routes) ----
+  readFile(handle: ContainerHandle, path: string): Promise<Buffer>;
+  writeFile(handle: ContainerHandle, path: string, content: Buffer): Promise<void>;
+  access(handle: ContainerHandle, path: string): Promise<void>;
+  readdir(handle: ContainerHandle, path: string): Promise<string[]>;
+  stat(handle: ContainerHandle, path: string): Promise<FileStat>;
+  exec(handle: ContainerHandle, command: string, opts?: ExecOptions): Promise<ExecResult>;
+}
+
+/**
+ * Persistence helper: read a container row and reconstruct the handle. The
+ * executor itself is stateless across process restarts; everything needed is
+ * in the DB (instance_name, node, overlay_path, status).
+ */
+export interface ContainerRowForExecutor {
+  id: number;
+  instance_name: string | null;
+  node: string | null;
+  overlay_path: string | null;
+  status: string;
+}
+
+export function handleFromRow(row: ContainerRowForExecutor): ContainerHandle {
+  if (!row.instance_name) throw new Error(`Container ${row.id} has no instance_name`);
+  return {
+    id: row.instance_name,
+    node: row.node ?? "local",
+    overlayPath: row.overlay_path ?? "",
+    running: row.status === "running",
+  };
+}
+
+/** Mirror a handle's running state back into the containers row. */
+export async function persistRunningState(
+  db: Database,
+  containerId: number,
+  running: boolean,
+): Promise<void> {
+  const now = new Date().toISOString();
+  if (running) {
+    await db.run(
+      "UPDATE containers SET status = 'running', last_started_at = ?, updated_at = ? WHERE id = ?",
+      now as SqlValue,
+      now as SqlValue,
+      containerId,
+    );
+  } else {
+    await db.run(
+      "UPDATE containers SET status = 'stopped', last_stopped_at = ?, updated_at = ? WHERE id = ?",
+      now as SqlValue,
+      now as SqlValue,
+      containerId,
+    );
+  }
+}
