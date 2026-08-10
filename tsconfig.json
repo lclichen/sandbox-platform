@@ -24,6 +24,7 @@
   // they are compiled by vitest at runtime, not typechecked here.
   "exclude": [
     "test/api-key.smoke.test.ts",
-    "test/extension-client.smoke.test.ts"
+    "test/extension-client.smoke.test.ts",
+    "test/autocomplete.test.ts"
   ]
 }
