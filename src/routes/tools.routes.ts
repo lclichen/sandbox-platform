@@ -19,6 +19,7 @@ import { Router, type Response } from "express";
 import { getDb, getExecutorFromReq } from "../app.ts";
 import { createToolsService } from "../services/tools.service.ts";
 import { createContainerService } from "../services/container.service.ts";
+import { toHttpError } from "../utils/errors.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
 import {
   readToolSchema,
@@ -124,8 +125,18 @@ export function toolsRouter(): Router {
     let bytesOut = 0;
     const writeEvent = (payload: string): void => {
       bytesOut += Buffer.byteLength(payload);
-      res.write(payload);
+      try {
+        res.write(payload);
+      } catch {
+        // Client disconnected mid-stream; the executor keeps running until its
+        // own timeout, and the session is settled by the close handler below.
+      }
     };
+    // Writing to a destroyed socket throws asynchronously; swallow it so a
+    // client disconnect mid-command cannot crash the process.
+    res.on("error", () => {
+      /* socket closed by client */
+    });
     // P2-3: settle the relay session when the stream ends — either a client
     // disconnect or normal completion — so accounting rows don't accumulate.
     res.on("close", () => {
@@ -153,8 +164,12 @@ export function toolsRouter(): Router {
           `event: end\ndata: ${JSON.stringify({ exitCode: result.exitCode, timedOut: result.timedOut })}\n\n`,
         );
       } catch (err) {
+        // SSE headers are already flushed, so the HTTP status stays 200; carry
+        // the semantic status/code inside the error event so clients can
+        // reconstruct a proper PlatformError (e.g. 404 for unknown containers).
+        const httpErr = toHttpError(err);
         writeEvent(
-          `event: error\ndata: ${JSON.stringify({ message: err instanceof Error ? err.message : String(err) })}\n\n`,
+          `event: error\ndata: ${JSON.stringify({ message: httpErr.message, code: httpErr.code, status: httpErr.status })}\n\n`,
         );
       } finally {
         res.end();

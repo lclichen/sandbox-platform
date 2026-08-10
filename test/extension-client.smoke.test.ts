@@ -112,6 +112,56 @@ describe("pi-sandbox-extension client <-> platform", () => {
       await new Promise<void>((resolveFn) => server.close(() => resolveFn()));
     }
   });
+
+  it("streams bash output live via toolBashStream (SSE)", async () => {
+    ctx = await setupTestApp();
+    const { createApp } = await import("../src/app.ts");
+    const http = (await import("node:http")).default;
+    const server = http.createServer((await createApp({ db: ctx.db, executor: ctx.app.locals.executor })).app);
+    await new Promise<void>((resolveFn) => server.listen(0, "127.0.0.1", resolveFn));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const url = `http://127.0.0.1:${port}`;
+
+    try {
+      saveConfig({ url });
+      const config = loadConfig(process.cwd());
+      const client = new PlatformClient(config);
+      await client.login("admin", "changeme123");
+
+      const created = await client.createContainer({ imageId: 1, name: "stream-box" });
+      await client.connectContainer(created.id);
+
+      // Events must arrive in order: live chunks, then the end event.
+      const events: Array<"chunk" | "end"> = [];
+      const chunks: string[] = [];
+      const result = await client.toolBashStream(created.id, "echo live-1 && echo live-2", {
+        onData: (chunk) => {
+          events.push("chunk");
+          chunks.push(chunk.toString("utf8"));
+        },
+      }).then((r) => {
+        events.push("end");
+        return r;
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(chunks.join("")).toContain("live-1");
+      expect(chunks.join("")).toContain("live-2");
+      // Every chunk arrived BEFORE the end event resolved.
+      expect(events.indexOf("chunk")).toBeGreaterThanOrEqual(0);
+      expect(events[events.length - 1]).toBe("end");
+
+      // Non-zero exit codes flow through the end event.
+      const failed = await client.toolBashStream(created.id, "echo oops && exit 3");
+      expect(failed.exitCode).toBe(3);
+
+      // Stream of a missing container rejects with a PlatformError.
+      await expect(client.toolBashStream(999999, "echo nope")).rejects.toMatchObject({ status: 404 });
+    } finally {
+      await new Promise<void>((resolveFn) => server.close(() => resolveFn()));
+    }
+  });
 });
 
 // Reference adminToken to keep the import meaningful for future assertions.
