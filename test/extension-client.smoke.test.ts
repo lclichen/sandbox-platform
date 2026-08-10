@@ -13,6 +13,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { setupTestApp, teardownTestApp, adminToken, type TestContext } from "./helper.ts";
 import { PlatformClient } from "../../pi-sandbox-extension/lib/client.ts";
+import { createPlatformBashOps, withContainerCwd } from "../../pi-sandbox-extension/lib/operations.ts";
 import { loadConfig, saveConfig, resetConfigCache } from "../../pi-sandbox-extension/lib/config.ts";
 
 let ctx: TestContext | undefined;
@@ -158,6 +159,40 @@ describe("pi-sandbox-extension client <-> platform", () => {
 
       // Stream of a missing container rejects with a PlatformError.
       await expect(client.toolBashStream(999999, "echo nope")).rejects.toMatchObject({ status: 404 });
+    } finally {
+      await new Promise<void>((resolveFn) => server.close(() => resolveFn()));
+    }
+  });
+
+  it("routes user_bash (!) commands into the container with a pinned cwd", async () => {
+    ctx = await setupTestApp();
+    const { createApp } = await import("../src/app.ts");
+    const http = (await import("node:http")).default;
+    const server = http.createServer((await createApp({ db: ctx.db, executor: ctx.app.locals.executor })).app);
+    await new Promise<void>((resolveFn) => server.listen(0, "127.0.0.1", resolveFn));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const url = `http://127.0.0.1:${port}`;
+
+    try {
+      saveConfig({ url });
+      const config = loadConfig(process.cwd());
+      const client = new PlatformClient(config);
+      await client.login("admin", "changeme123");
+      const created = await client.createContainer({ imageId: 1, name: "bang-box" });
+      await client.connectContainer(created.id);
+
+      // Simulate pi's user_bash: it passes the LOCAL session cwd (host path).
+      const ops = withContainerCwd(createPlatformBashOps(client, created.id));
+      let output = "";
+      const result = await ops.exec("pwd", "D:\\MyCourses\\26Q3\\AgentSandbox", {
+        onData: (chunk) => {
+          output += chunk.toString("utf8");
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      // The command ran inside the container's workspace root.
+      expect(output).toContain("workspace");
     } finally {
       await new Promise<void>((resolveFn) => server.close(() => resolveFn()));
     }

@@ -11,6 +11,7 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { containerPathToLocal } from "../../pi-sandbox-extension/lib/paths.ts";
+import { withContainerCwd } from "../../pi-sandbox-extension/lib/operations.ts";
 import {
   collectLocalFiles,
   syncWorkspaceToContainer,
@@ -113,5 +114,21 @@ describe("syncWorkspaceToContainer", () => {
       ignoreDirs: new Set([...DEFAULT_SYNC_IGNORE, "generated"]),
     });
     expect(result.files).toBe(2); // generated/out.js skipped
+  });
+});
+
+describe("withContainerCwd (user_bash ! prefix)", () => {
+  it("pins exec cwd to the container workspace root regardless of pi's cwd", async () => {
+    const seen: Array<{ command: string; cwd: string | undefined }> = [];
+    const ops = {
+      exec: async (command: string, cwd: string | undefined) => {
+        seen.push({ command, cwd });
+        return { exitCode: 0 };
+      },
+    };
+    const wrapped = withContainerCwd(ops as never);
+    // pi's user_bash passes the LOCAL session cwd (a host path).
+    await wrapped.exec("ls", "D:\\MyCourses\\26Q3\\AgentSandbox", {});
+    expect(seen).toEqual([{ command: "ls", cwd: "/workspace" }]);
   });
 });
