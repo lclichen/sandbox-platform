@@ -85,7 +85,7 @@ describe("container tools", () => {
       .request()
       .post(`/api/v1/containers/${cid}/tools/bash`)
       .set("Authorization", `Bearer ${token}`)
-      .send({ command: process.platform === "win32" ? "cd sub && dir /b" : "ls sub", cwd: "." });
+      .send({ command: "ls sub", cwd: "." });
     expect(res.status).toBe(200);
     // Listing the created file via cwd-relative path works.
     expect(res.body.stdout).toContain("f.txt");
@@ -207,7 +207,7 @@ describe("container tools", () => {
       .request()
       .post(`/api/v1/containers/${cid}/tools/bash`)
       .set("Authorization", `Bearer ${token}`)
-      .send({ command: process.platform === "win32" ? "dir /b" : "ls", cwd: "/workspace" });
+      .send({ command: "ls", cwd: "/workspace" });
     expect(res.status).toBe(200);
     expect(res.body.exitCode).toBe(0);
     expect(res.body.stdout).toContain("from-ws.txt");

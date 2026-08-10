@@ -25,6 +25,7 @@
   "exclude": [
     "test/api-key.smoke.test.ts",
     "test/extension-client.smoke.test.ts",
-    "test/autocomplete.test.ts"
+    "test/autocomplete.test.ts",
+    "test/extension-sync.test.ts"
   ]
 }

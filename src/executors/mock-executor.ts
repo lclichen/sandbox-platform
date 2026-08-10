@@ -9,6 +9,7 @@
  */
 import { spawn } from "node:child_process";
 import { mkdir, rm, readdir, stat, cp, access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join, resolve, dirname as pathDirname, sep } from "node:path";
 import type {
   SandboxExecutor,
@@ -192,8 +193,10 @@ export class MockExecutor implements SandboxExecutor {
         };
       }
     }
-    const shell = process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : "/bin/sh";
-    const shellArgs = process.platform === "win32" ? ["/c", command] : ["-c", command];
+    const shell = resolveShell();
+    const shellArgs = process.platform === "win32" && !shell.toLowerCase().includes("sh")
+      ? ["/c", command]
+      : ["-c", command];
     return new Promise((resolveFn) => {
       const child = spawn(shell, shellArgs, {
         cwd,
@@ -306,4 +309,27 @@ export class MockExecutor implements SandboxExecutor {
     }
     return total;
   }
+}
+
+/**
+ * Choose the shell for `exec`. On win32 the default cmd.exe mangles non-ASCII
+ * commands (UTF-8 decoded as the ANSI codepage) and lacks POSIX tools; prefer
+ * Git Bash's sh when installed so the mock behaves like the production
+ * (Linux) executors — UTF-8 native, POSIX semantics. Falls back to cmd.exe.
+ */
+function resolveShell(): string {
+  if (process.platform !== "win32") return "/bin/sh";
+  const gitShCandidates = [
+    "C:\\Program Files\\Git\\bin\\sh.exe",
+    "C:\\Program Files (x86)\\Git\\bin\\sh.exe",
+    "C:\\Program Files\\Git\\usr\\bin\\sh.exe",
+    "D:\\Programs\\Git\\bin\\sh.exe",
+    "D:\\Programs\\Git\\usr\\bin\\sh.exe",
+  ];
+  for (const candidate of gitShCandidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  const comSpec = process.env.ComSpec;
+  if (comSpec && comSpec.trim()) return comSpec;
+  return "cmd.exe";
 }

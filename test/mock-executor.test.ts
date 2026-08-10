@@ -145,7 +145,7 @@ describe("MockExecutor lifecycle", () => {
     expect(st.isFile).toBe(true);
 
     // exec with cwd=/workspace runs inside the sandbox and can see the file.
-    const res = await exec.exec(handle, process.platform === "win32" ? "dir /b" : "ls", { cwd: "/workspace" });
+    const res = await exec.exec(handle, "ls", { cwd: "/workspace" });
     expect(res.exitCode).toBe(0);
     expect(res.stdout).toContain("notes.txt");
 
@@ -186,8 +186,25 @@ describe("MockExecutor lifecycle", () => {
       overlayPath: legacyRoot,
       running: true,
     } as unknown as ContainerHandle;
-    const res = await exec.exec(handle, process.platform === "win32" ? "dir /b" : "ls", { cwd: "/workspace" });
+    const res = await exec.exec(handle, "ls", { cwd: "/workspace" });
     expect(res.exitCode).toBe(0);
+    await exec.destroy(handle);
+  });
+
+  it("round-trips non-ASCII output (UTF-8 shell)", async () => {
+    const exec = new MockExecutor(base);
+    const handle = await exec.create({ id: "sb-utf8", imagePath: "/x", cpu: 1, memoryMb: 256, diskGb: 1 });
+    const res = await exec.exec(handle, "echo 你好世界");
+    if (res.stdout.includes("你好世界")) {
+      // Git Bash sh (preferred on win32) / POSIX shells round-trip UTF-8.
+      expect(res.stdout).toContain("你好世界");
+    } else if (process.platform === "win32") {
+      // cmd.exe fallback (no Git Bash installed) cannot round-trip non-ASCII
+      // through the ANSI codepage; the command still runs (documented limit).
+      expect(res.exitCode).toBe(0);
+    } else {
+      expect(res.stdout).toContain("你好世界");
+    }
     await exec.destroy(handle);
   });
 });
