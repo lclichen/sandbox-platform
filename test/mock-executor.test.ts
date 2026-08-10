@@ -132,4 +132,35 @@ describe("MockExecutor lifecycle", () => {
     expect(rootListing).toContain("sub");
     await exec.destroy(handle);
   });
+
+  it("interprets container-style absolute paths (/workspace/...) inside the sandbox", async () => {
+    const exec = new MockExecutor(base);
+    const handle = await exec.create({ id: "sb-abs", imagePath: "/x", cpu: 1, memoryMb: 256, diskGb: 1 });
+    // /workspace is the container's workspace, not the host root.
+    await exec.writeFile(handle, "/workspace/notes.txt", Buffer.from("abs-path", "utf8"));
+    const data = await exec.readFile(handle, "/workspace/notes.txt");
+    expect(data.toString("utf8")).toBe("abs-path");
+    const st = await exec.stat(handle, "/workspace/notes.txt");
+    expect(st.isFile).toBe(true);
+
+    // exec with cwd=/workspace runs inside the sandbox and can see the file.
+    const res = await exec.exec(handle, process.platform === "win32" ? "dir /b" : "ls", { cwd: "/workspace" });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("notes.txt");
+
+    // Host-style absolute paths are still rejected (they would escape).
+    const hostAbs = process.platform === "win32" ? "C:\\Windows\\win.ini" : "/etc/passwd";
+    await expect(exec.readFile(handle, hostAbs)).rejects.toThrow(/escapes the sandbox root/);
+    await exec.destroy(handle);
+  });
+
+  it("emulates a shell cd failure for a missing cwd instead of crashing", async () => {
+    const exec = new MockExecutor(base);
+    const handle = await exec.create({ id: "sb-nocwd", imagePath: "/x", cpu: 1, memoryMb: 256, diskGb: 1 });
+    const res = await exec.exec(handle, "echo should-not-run", { cwd: "/no/such/dir" });
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("No such file or directory");
+    expect(res.stdout).toBe("");
+    await exec.destroy(handle);
+  });
 });

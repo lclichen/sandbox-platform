@@ -191,6 +191,50 @@ describe("container tools", () => {
     expect(Buffer.from(text.match(/chunk":"([^"]+)/)?.[1] ?? "", "base64").toString("utf8")).toContain("streamed-output");
   });
 
+  it("bash with container-style cwd (/workspace) runs inside the sandbox", async () => {
+    ctx = await setupTestApp();
+    const token = await createUserAndLogin(ctx, "tooluser9");
+    const cid = await newContainer(ctx, token, "workspace-cwd-box");
+    // The extension's bash tool always sends cwd=/workspace (GUEST_WORKSPACE).
+    const write = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/write`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ path: "/workspace/from-ws.txt", content: b64("ws-content") });
+    expect(write.status).toBe(200);
+
+    const res = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/bash`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ command: process.platform === "win32" ? "dir /b" : "ls", cwd: "/workspace" });
+    expect(res.status).toBe(200);
+    expect(res.body.exitCode).toBe(0);
+    expect(res.body.stdout).toContain("from-ws.txt");
+
+    // Reading back through the container-style path works too.
+    const read = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/read`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ path: "/workspace/from-ws.txt" });
+    expect(Buffer.from(read.body.contentBase64, "base64").toString("utf8")).toBe("ws-content");
+  });
+
+  it("bash with a missing container cwd reports a cd failure, not a 500", async () => {
+    ctx = await setupTestApp();
+    const token = await createUserAndLogin(ctx, "tooluser10");
+    const cid = await newContainer(ctx, token, "missing-cwd-box");
+    const res = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/bash`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ command: "echo nope", cwd: "/no/such/dir" });
+    expect(res.status).toBe(200);
+    expect(res.body.exitCode).toBe(1);
+    expect(res.body.stderr).toContain("No such file or directory");
+  });
+
   it("audits tool commands with the command text in detail", async () => {
     ctx = await setupTestApp();
     const token = await createUserAndLogin(ctx, "tooluser8");

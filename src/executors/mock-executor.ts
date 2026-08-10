@@ -9,7 +9,7 @@
  */
 import { spawn } from "node:child_process";
 import { mkdir, rm, readdir, stat, cp, access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
-import { join, resolve, dirname as pathDirname } from "node:path";
+import { join, resolve, dirname as pathDirname, sep } from "node:path";
 import type {
   SandboxExecutor,
   ExecutorKind,
@@ -55,6 +55,9 @@ export class MockExecutor implements SandboxExecutor {
     await mkdir(root, { recursive: true });
     // Seed a tiny marker so the "container" looks initialized.
     await fsWriteFile(join(root, ".sandbox_root"), `mock container ${req.id}\nimage=${req.imagePath}\n`);
+    // The conventional in-container workspace dir always exists (the extension
+    // runs commands with cwd=/workspace); seeding below may populate it.
+    await mkdir(join(root, "workspace"), { recursive: true });
     // Seed /workspace from a host-side workspace directory when requested.
     if (req.seedFromPath) {
       const wsTarget = join(root, "workspace");
@@ -149,7 +152,23 @@ export class MockExecutor implements SandboxExecutor {
   }
 
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {
-    const cwd = opts.cwd ? this.resolveIn(handle, opts.cwd) : this.root(handle);
+    const root = this.root(handle);
+    let cwd = root;
+    if (opts.cwd) {
+      cwd = this.resolveIn(handle, opts.cwd); // throws BadRequestError on escape
+      // Emulate the container shell: cd into a missing dir fails the command
+      // (exit 1 + stderr), rather than crashing spawn with ENOENT.
+      try {
+        await fsAccess(cwd);
+      } catch {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: `cd: ${opts.cwd}: No such file or directory`,
+          timedOut: false,
+        };
+      }
+    }
     const shell = process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : "/bin/sh";
     const shellArgs = process.platform === "win32" ? ["/c", command] : ["-c", command];
     return new Promise((resolveFn) => {
@@ -212,6 +231,11 @@ export class MockExecutor implements SandboxExecutor {
    * outside the container root is rejected outright; the mock is NOT
    * permissive, because it is the default executor on win32 and the factory's
    * last-resort fallback, so an escape here is a host-escape anywhere.
+   *
+   * Container-style absolute paths (`/workspace`, `/etc/...`) are interpreted
+   * relative to the CONTAINER root, not the host root — leading slashes are
+   * stripped, exactly like the real executors (where those paths are resolved
+   * inside the container's own filesystem).
    */
   private resolveIn(handle: ContainerHandle, pathArg: string): string {
     const trimmed = pathArg.startsWith("@") ? pathArg.slice(1) : pathArg;
@@ -221,9 +245,13 @@ export class MockExecutor implements SandboxExecutor {
     if (trimmed.includes("\0")) {
       throw new BadRequestError("Invalid container path");
     }
-    const abs = resolve(root, trimmed);
+    const containerRel = trimmed.replace(/^\/+/, "");
+    if (!containerRel || containerRel === ".") return root;
+    // Convert posix separators to host separators before resolve so
+    // cross-platform `..` detection works.
+    const hostRel = sep === "/" ? containerRel : containerRel.split("/").join(sep);
+    const abs = resolve(root, hostRel);
     // Containment check: abs must equal root or live beneath it.
-    const sep = process.platform === "win32" ? "\\" : "/";
     const prefix = root.endsWith(sep) ? root : root + sep;
     if (abs !== root && !abs.startsWith(prefix)) {
       throw new BadRequestError("Container path escapes the sandbox root");
