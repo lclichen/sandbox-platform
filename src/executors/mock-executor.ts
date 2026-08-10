@@ -40,9 +40,32 @@ export class MockExecutor implements SandboxExecutor {
     try {
       await mkdir(this.baseDir, { recursive: true });
       await mkdir(this.snapshotDir, { recursive: true });
+      // Backfill: containers created before the workspace-dir change (commit
+      // 2330489) lack <root>/workspace, so `cd /workspace` (the extension's
+      // default cwd) fails for them. Ensure the dir exists for every existing
+      // container; harmless mkdir -p, runs once per process start.
+      await this.ensureAllWorkspaceDirs();
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /** Ensure <containerRoot>/workspace exists for every existing container. */
+  private async ensureAllWorkspaceDirs(): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(this.baseDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        await mkdir(join(this.baseDir, entry.name, "workspace"), { recursive: true });
+      } catch {
+        // ignore per-container failures
+      }
     }
   }
 

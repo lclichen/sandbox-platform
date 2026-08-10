@@ -5,11 +5,12 @@
  * directory so win32 can run it without any container runtime.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile as fsWriteFile, readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockExecutor } from "../src/executors/mock-executor.ts";
 import { setExecutorForTesting, resetExecutorForTesting } from "../src/executors/factory.ts";
+import type { ContainerHandle } from "../src/executors/types.ts";
 
 let base: string;
 
@@ -161,6 +162,32 @@ describe("MockExecutor lifecycle", () => {
     expect(res.exitCode).toBe(1);
     expect(res.stderr).toContain("No such file or directory");
     expect(res.stdout).toBe("");
+    await exec.destroy(handle);
+  });
+
+  it("backfills /workspace for containers created before the workspace-dir change", async () => {
+    // Simulate a legacy container root (only .sandbox_root, no workspace/).
+    const legacyRoot = join(base, "sb-legacy");
+    await mkdir(legacyRoot, { recursive: true });
+    await fsWriteFile(join(legacyRoot, ".sandbox_root"), "legacy marker");
+
+    const exec = new MockExecutor(base);
+    await exec.isAvailable(); // backfill runs here
+
+    // The legacy container gained a workspace dir...
+    const wsStat = await fsStat(join(legacyRoot, "workspace"));
+    expect(wsStat.isDirectory()).toBe(true);
+    // ...its existing files are untouched...
+    expect(await fsReadFile(join(legacyRoot, ".sandbox_root"), "utf8")).toBe("legacy marker");
+    // ...and it can now run commands with cwd=/workspace.
+    const handle = {
+      id: "sb-legacy",
+      node: "mock-local",
+      overlayPath: legacyRoot,
+      running: true,
+    } as unknown as ContainerHandle;
+    const res = await exec.exec(handle, process.platform === "win32" ? "dir /b" : "ls", { cwd: "/workspace" });
+    expect(res.exitCode).toBe(0);
     await exec.destroy(handle);
   });
 });
