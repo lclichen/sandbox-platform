@@ -35,6 +35,12 @@ describe("extractAtPrefix", () => {
     expect(extractAtPrefix("user@example.com")).toBeNull();
     expect(extractAtPrefix("x@y z")).toBeNull();
   });
+
+  it("does not treat plain unclosed quotes as @-mentions (matches pi)", () => {
+    expect(extractAtPrefix('"foo')).toBeNull();
+    expect(extractAtPrefix('x="foo')).toBeNull();
+    expect(extractAtPrefix('@"foo')).toBe('@"foo');
+  });
 });
 
 describe("buildCompletionValue", () => {
@@ -171,6 +177,28 @@ describe("createContainerAutocompleteProvider", () => {
     // Directory: keeps trailing slash, no space, cursor stays after the slash.
     const dirRes = provider.applyCompletion(["@src"], 0, 4, { value: "@src/", label: "src/" }, "@src");
     expect(dirRes.lines[0]).toBe("@src/");
+  });
+
+  it("delegates applyCompletion for slash-command items (regression: no lost /)", () => {
+    // Slash-command items from the built-in provider carry NO leading "/"
+    // (e.g. value "sandbox-login"); the built-in's applyCompletion adds it.
+    // Our wrapper must hand those to the wrapped provider, otherwise Enter on
+    // "/sandbox-login" submits "sandbox-login" as plain text to the model.
+    let delegated: { item: unknown; prefix: string } | null = null;
+    const current: AutocompleteProvider = {
+      ...stubCurrent,
+      applyCompletion: (_l, _cl, _cc, item, prefix) => {
+        delegated = { item, prefix };
+        return { lines: ["/sandbox-login "], cursorLine: 0, cursorCol: 14 };
+      },
+    };
+    const provider = createContainerAutocompleteProvider(current, () => ({
+      client: fakeClient({}),
+      containerId: 7,
+    }));
+    const res = provider.applyCompletion(["/sandbox-login"], 0, 14, { value: "sandbox-login", label: "sandbox-login" }, "/sandbox-login");
+    expect(delegated).toEqual({ item: { value: "sandbox-login", label: "sandbox-login" }, prefix: "/sandbox-login" });
+    expect(res.lines[0]).toBe("/sandbox-login "); // slash preserved by the delegate
   });
 
   it("respects the abort signal after the listing resolves", async () => {
