@@ -125,3 +125,63 @@ export interface ApiErrorBody {
   message: string;
   details?: unknown;
 }
+
+// ----- LLM integration (LiteLLM proxy) -----
+
+/** A platform user's LLM access binding. Mirrors LlmBindingPublic. */
+export interface LlmBinding {
+  id: number;
+  platform_user_id: number;
+  litellm_user_id: string;
+  username: string;
+  litellm_alias: string | null;
+  max_budget: number;
+  budget_duration: string | null;
+  models: string[] | null;
+  granted_at: string;
+  granted_by: number;
+  revoked_at: string | null;
+}
+
+/** A managed LiteLLM virtual key (plaintext never included). Mirrors LlmVirtualKeyPublic. */
+export interface LlmVirtualKey {
+  id: number;
+  user_id: number;
+  litellm_key_id: string | null;
+  key_prefix: string;
+  name: string;
+  models: string[] | null;
+  max_budget: number | null;
+  budget_duration: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface LlmModel {
+  id: string;
+  object?: string;
+  owned_by?: string;
+}
+
+/** Response from /llm/me: binding may be null when the user has no access. */
+export interface LlmMyStatus {
+  binding: LlmBinding | null;
+  litellm: {
+    user_id?: string;
+    spend?: number;
+    max_budget?: number | null;
+    budget_duration?: string | null;
+    models?: string[] | null;
+  } | null;
+}
+
+export interface LlmEndpoint {
+  baseUrl: string;
+  instructions: string;
+}
+
+/** Spend report entry (shape is loose: LiteLLM varies group_by fields). */
+export interface LlmSpendEntry {
+  [key: string]: unknown;
+}

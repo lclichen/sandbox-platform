@@ -30,6 +30,11 @@ import { auditMiddleware } from "./routes/audit.middleware.ts";
 import { adminRouter } from "./routes/admin.routes.ts";
 import { publicImagesRouter } from "./routes/images.public.routes.ts";
 import { publicLogsRouter } from "./routes/logs.public.routes.ts";
+import { llmAdminRouter } from "./routes/llm.admin.routes.ts";
+import { llmRouter } from "./routes/llm.routes.ts";
+import { createLitellmClient, isLitellmConfigured, type LitellmClient } from "./services/litellm.client.ts";
+import { createLlmService } from "./services/llm.service.ts";
+import { isValidKeyHex, type EncryptionKey } from "./utils/crypto.ts";
 
 export interface AppDeps {
   db: Database;
@@ -39,6 +44,24 @@ export interface AppDeps {
 export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Database }> {
   const db = deps?.db ?? (await createDatabase());
   const executor = deps?.executor ?? (await getExecutor());
+
+  // LiteLLM integration is optional. Wire it only when the admin has enabled it
+  // AND supplied both the master key and a valid encryption key; otherwise the
+  // /api/v1/*llm* routes return 503 via the accessors below.
+  const cfg = loadConfig();
+  let litellmClient: LitellmClient | undefined;
+  let llmEncryptionKey: EncryptionKey | undefined;
+  const llmReady =
+    isLitellmConfigured({ enabled: cfg.llm.enabled, litellm: { masterKey: cfg.llm.litellm.masterKey } }) &&
+    isValidKeyHex(cfg.llm.encryptionKey);
+  if (llmReady) {
+    litellmClient = createLitellmClient({
+      baseUrl: cfg.llm.litellm.baseUrl,
+      masterKey: cfg.llm.litellm.masterKey!,
+      timeoutMs: cfg.llm.litellm.timeoutMs,
+    });
+    llmEncryptionKey = cfg.llm.encryptionKey;
+  }
 
   const app = express();
   app.use(express.json({ limit: "16mb" }));
@@ -67,10 +90,14 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   const trustProxy = loadConfig().trustProxy;
   if (trustProxy > 0) app.set("trust proxy", trustProxy);
 
-  // Attach db + executor on every request.
+  // Attach db + executor (+ optional LiteLLM client) on every request.
   app.use((req: Request, _res: Response, next: NextFunction) => {
     req.app.locals.db = db;
     req.app.locals.executor = executor;
+    req.app.locals.litellmClient = litellmClient;
+    req.app.locals.llmReady = llmReady;
+    req.app.locals.llmEncryptionKey = llmEncryptionKey;
+    req.app.locals.llmPublicBaseUrl = cfg.llm.litellm.publicBaseUrl;
     next();
   });
 
@@ -80,13 +107,19 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   });
 
   // Readiness probe (P2-2): DB reachable + overlay base dir writable.
+  // When LLM integration is enabled, also probe LiteLLM liveness.
   app.get("/ready", async (_req: Request, res: Response) => {
     try {
       await db.get("SELECT 1");
       const overlayBase = loadConfig().executor.apptainer.overlayBaseDir;
       await mkdir(overlayBase, { recursive: true });
       await access(overlayBase, fsConstants.W_OK);
-      res.json({ status: "ready", dialect: db.dialect, executor: executor.kind });
+      let litellm: "disabled" | "ok" | "down" = "disabled";
+      if (litellmClient) {
+        litellm = (await litellmClient.health()) ? "ok" : "down";
+        if (litellm === "down") throw new Error("LiteLLM unreachable");
+      }
+      res.json({ status: "ready", dialect: db.dialect, executor: executor.kind, litellm });
     } catch {
       res.status(503).json({ status: "not_ready" });
     }
@@ -127,6 +160,8 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.use("/api/v1/workspaces", workspacesRouter());
   app.use("/api/v1/images", publicImagesRouter());
   app.use("/api/v1/logs", publicLogsRouter());
+  app.use("/api/v1/admin/llm", llmAdminRouter());
+  app.use("/api/v1/llm", llmRouter());
   app.use("/api/v1/admin", adminRouter());
 
   // Serve the admin SPA (web/dist) if it has been built. API routes above take
@@ -202,6 +237,33 @@ export function getExecutorFromReq(req: Request): SandboxExecutorRef {
   const exec = req.app.locals.executor as SandboxExecutorRef | undefined;
   if (!exec) throw new HttpError(500, "internal_error", "Executor not attached to request");
   return exec;
+}
+
+/**
+ * Typed accessor for the optional LiteLLM client. Throws 503 (llm_not_enabled)
+ * when integration is off, so LLM routes fail loudly and uniformly instead of
+ * each one re-checking config.
+ */
+export function getLitellmClient(req: Request): LitellmClient {
+  const ready = req.app.locals.llmReady as boolean | undefined;
+  const client = req.app.locals.litellmClient as LitellmClient | undefined;
+  if (!ready || !client) {
+    throw new HttpError(503, "llm_not_enabled", "LLM integration is not enabled. Set LLM_ENABLED=true and configure LITELLM_MASTER_KEY / LLM_ENCRYPTION_KEY.");
+  }
+  return client;
+}
+
+/**
+ * Build an LlmService bound to this request's db + LiteLLM client. Constructed
+ * per-request to match the existing service-factory convention.
+ */
+export function getLlmService(req: Request) {
+  const db = getDb(req);
+  const client = getLitellmClient(req);
+  const key = req.app.locals.llmEncryptionKey as EncryptionKey | undefined;
+  if (!key) throw new HttpError(500, "internal_error", "LLM encryption key not attached to request");
+  const publicBaseUrl = (req.app.locals.llmPublicBaseUrl as string | undefined) ?? "http://localhost:4000";
+  return createLlmService(db, client, key, { publicBaseUrl });
 }
 
 export type { HttpError };

@@ -9,6 +9,8 @@ import { Images } from "./pages/Images";
 import { Containers } from "./pages/Containers";
 import { Logs } from "./pages/Logs";
 import { Workspaces } from "./pages/Workspaces";
+import { LlmAdmin } from "./pages/LlmAdmin";
+import { LlmKeys } from "./pages/LlmKeys";
 
 /** Route guard: redirect to /login when not authenticated. */
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -56,11 +58,20 @@ export function App() {
                     </RequireAdmin>
                   }
                 />
+                <Route
+                  path="llm-admin"
+                  element={
+                    <RequireAdmin>
+                      <LlmAdmin />
+                    </RequireAdmin>
+                  }
+                />
                 {/* available to all authenticated users */}
                 <Route path="images" element={<Images />} />
                 <Route path="containers" element={<Containers />} />
                 <Route path="workspaces" element={<Workspaces />} />
                 <Route path="logs" element={<Logs />} />
+                <Route path="llm" element={<LlmKeys />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </Layout>

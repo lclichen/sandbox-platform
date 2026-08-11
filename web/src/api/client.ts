@@ -215,6 +215,46 @@ export const api = {
     offset?: number;
   }) => request<{ total: number; logs: import("./types").LogRow[] }>(`/api/v1/logs?${qs(params)}`),
 
+  // LLM integration (LiteLLM proxy). Admin endpoints manage bindings; user
+  // endpoints are owner-scoped. When LLM is disabled these return 503
+  // llm_not_enabled, which callers surface as a banner.
+  listLlmBindings: () =>
+    request<{ bindings: import("./types").LlmBinding[] }>("/api/v1/admin/llm/bindings"),
+  grantLlmAccess: (body: {
+    platformUserId: number;
+    maxBudget: number;
+    budgetDuration?: string | null;
+    models?: string[] | null;
+    defaultKeyName?: string;
+  }) =>
+    request<{ binding: import("./types").LlmBinding; key: { id: number; plaintext: string } }>(
+      "/api/v1/admin/llm/bindings",
+      { method: "POST", body },
+    ),
+  updateLlmBudget: (
+    userId: number,
+    body: { maxBudget?: number; budgetDuration?: string | null; models?: string[] | null },
+  ) => request<{ binding: import("./types").LlmBinding }>(`/api/v1/admin/llm/bindings/${userId}`, { method: "PATCH", body }),
+  revokeLlmAccess: (userId: number) => request<void>(`/api/v1/admin/llm/bindings/${userId}`, { method: "DELETE" }),
+  getLlmBindingUsage: (userId: number, startDate: string, endDate: string) =>
+    request<{ user: unknown; report: import("./types").LlmSpendEntry[]; logs: import("./types").LlmSpendEntry[] }>(
+      `/api/v1/admin/llm/bindings/${userId}/usage?${qs({ startDate, endDate })}`,
+    ),
+  listLlmKeys: () => request<{ keys: import("./types").LlmVirtualKey[] }>("/api/v1/admin/llm/keys"),
+  listLlmModels: () => request<{ models: import("./types").LlmModel[] }>("/api/v1/admin/llm/models"),
+  // user (self-service)
+  getMyLlmStatus: () => request<import("./types").LlmMyStatus>("/api/v1/llm/me"),
+  listMyLlmKeys: () => request<{ keys: import("./types").LlmVirtualKey[] }>("/api/v1/llm/me/keys"),
+  revokeMyLlmKey: (id: number) => request<void>(`/api/v1/llm/me/keys/${id}`, { method: "DELETE" }),
+  revealMyLlmKey: (id: number) =>
+    request<{ id: number; plaintext: string }>(`/api/v1/llm/me/keys/${id}/reveal`, { method: "POST" }),
+  getMyLlmUsage: (startDate: string, endDate: string) =>
+    request<{ user: unknown; report: import("./types").LlmSpendEntry[]; logs: import("./types").LlmSpendEntry[] }>(
+      `/api/v1/llm/me/usage?${qs({ startDate, endDate })}`,
+    ),
+  getLlmEndpoint: () => request<import("./types").LlmEndpoint>("/api/v1/llm/me/endpoint"),
+  getMyLlmModels: () => request<{ models: import("./types").LlmModel[] }>("/api/v1/llm/models"),
+
   // workspaces: persistent per-user file storage; seeds a container's /workspace on create
   listWorkspaces: (params: { limit?: number; offset?: number; search?: string } = {}) =>
     request<{ total: number; workspaces: import("./types").WorkspaceRow[] }>(

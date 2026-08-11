@@ -1,0 +1,92 @@
+# =============================================================================
+# LiteLLM Proxy + Postgres, scoped to the AgentSandbox platform integration.
+# =============================================================================
+#
+# Brings up:
+#   - litellm-proxy  : the ai-gateway on :4000 (management + LLM traffic)
+#   - litellm-db     : a dedicated Postgres 15 on :5433 (NOT shared with the
+#                      platform's own DB, to avoid migration conflicts)
+#
+# Why a dedicated Postgres: LiteLLM only supports Postgres in production and
+# owns its schema (LiteLLM_* tables). Sharing it with the platform would couple
+# two independent migration systems. The platform reads spend via LiteLLM's
+# HTTP API, never its DB directly.
+#
+# Usage:
+#   1. Copy .env.example -> .env and fill in the secrets (see comments there).
+#   2. Edit config.yaml to add your real model providers + API keys.
+#   3. docker compose up -d
+#   4. Health check:  curl http://localhost:4000/health/liveliness
+#
+# Windows note: native Python LiteLLM is fragile under Windows' asyncio event
+# loop; running it in Docker (this file) sidesteps that entirely. Requires
+# Docker Desktop (WSL2 backend recommended).
+# =============================================================================
+
+services:
+  litellm-db:
+    image: postgres:15-alpine
+    container_name: agentsandbox-litellm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LITELLM_PG_USER:-litellm}
+      POSTGRES_PASSWORD: ${LITELLM_PG_PASSWORD:-changeme}
+      POSTGRES_DB: ${LITELLM_PG_DB:-litellm}
+    ports:
+      # Non-default port (5433) to avoid clashing with any host Postgres or the
+      # platform's own DB on 5432.
+      - "5433:5432"
+    volumes:
+      - litellm-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LITELLM_PG_USER:-litellm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  litellm-proxy:
+    # Pin to the official image. Check https://hub.docker.com/r/litellm/litellm
+    # for newer tags; v1.x stable lines are recommended.
+    image: litellm/litellm:main-stable
+    container_name: agentsandbox-litellm-proxy
+    restart: unless-stopped
+    depends_on:
+      litellm-db:
+        condition: service_healthy
+    environment:
+      # Management credential. MUST start with 'sk-'. Copy the SAME value into
+      # the platform's .env as LITELLM_MASTER_KEY.
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      # Encryption salt for provider credentials stored in DB. Generate once:
+      #   openssl rand -hex 32
+      # WARNING: cannot be rotated after credentials are stored.
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      DATABASE_URL: postgresql://${LITELLM_PG_USER:-litellm}:${LITELLM_PG_PASSWORD:-changeme}@litellm-db:5432/${LITELLM_PG_DB:-litellm}
+      # Quieten per-request info logging.
+      LITELLM_LOG: ERROR
+      # Provider keys referenced by config.yaml via os.environ/<NAME>.
+      # Uncomment and fill per your configured models.
+      # OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # GEMINI_API_KEY: ${GEMINI_API_KEY}
+    ports:
+      - "4000:4000"
+    volumes:
+      # Mount the config file read-only into the container.
+      - ./config.yaml:/app/config.yaml:ro
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+      - --num_workers
+      - "1"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health/liveliness"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  litellm-pg-data:

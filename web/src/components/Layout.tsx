@@ -10,12 +10,14 @@ const COMMON_NAV: Array<{ to: string; label: string }> = [
   { to: "/workspaces", label: "Workspaces" },
   { to: "/images", label: "Images" },
   { to: "/logs", label: "Logs" },
+  { to: "/llm", label: "LLM keys" },
 ];
 
 // Admin-only management pages.
 const ADMIN_NAV: Array<{ to: string; label: string }> = [
   { to: "/users", label: "Users" },
   { to: "/quotas", label: "Quotas" },
+  { to: "/llm-admin", label: "LLM" },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {

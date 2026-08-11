@@ -1,0 +1,49 @@
+# =============================================================================
+# LiteLLM Proxy configuration for the AgentSandbox platform integration.
+# =============================================================================
+#
+# This file is consumed by the LiteLLM container started via docker-compose.yml
+# in the same directory. The platform talks to LiteLLM as the master-key holder
+# to provision users, issue virtual keys, set budgets, and read spend; LLM
+# traffic itself is driven by clients directly against this proxy (:4000).
+#
+# Docs: https://docs.litellm.ai/docs/proxy/config_settings
+# =============================================================================
+
+model_list:
+  # ---- Example model entries. Replace / extend with your real providers. ----
+  # Each entry maps a friendly `model_name` (what clients request) to a backend
+  # `litellm_params.model` and the provider credentials.
+  #
+  # - model_name: gpt-4o
+  #   litellm_params:
+  #     model: openai/gpt-4o
+  #     api_key: os.environ/OPENAI_API_KEY
+  #
+  # - model_name: claude-sonnet
+  #   litellm_params:
+  #     model: anthropic/claude-3-5-sonnet-20241022
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+  #
+  # - model_name: gemini-pro
+  #   litellm_params:
+  #     model: gemini/gemini-1.5-pro
+  #     api_key: os.environ/GEMINI_API_KEY
+
+litellm_settings:
+  # Drop request bodies from logs to reduce storage / PII exposure. Spend and
+  # token counts are still recorded. Set to false while debugging.
+  drop_params: true
+  # Optional: real-time spend callback into the platform (future work). Leave
+  # empty for now; the platform reads spend via /spend/* on demand.
+  # success_callback: []
+
+general_settings:
+  # Master key authenticates the platform's management calls. MUST start with
+  # 'sk-'. Provided via the LITELLM_MASTER_KEY env var in docker-compose.
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Allow adding/removing models via the UI & /model/* APIs at runtime.
+  store_model_in_db: true
+  # Postgres is the only supported DB for LiteLLM production state (spend,
+  # keys, users). Pointed at the companion `litellm-db` container.
+  database_url: os.environ/DATABASE_URL

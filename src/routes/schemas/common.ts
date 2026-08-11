@@ -175,3 +175,41 @@ export const workspaceDirSchema = z.object({
     .max(1024)
     .regex(/^[^\u0000<>:"|?*]+$/, "Path contains forbidden characters"),
 });
+
+// ----- LLM integration -----
+// LiteLLM budget_duration uses values like "1d"/"30d"/"24h"; we accept the same
+// vocabulary and let LiteLLM validate.
+const budgetDurationSchema = z
+  .string()
+  .min(1)
+  .max(16)
+  .regex(/^\d+(s|m|h|d)$/, "Use a number followed by s/m/h/d (e.g. 1d, 24h, 30d)")
+  .nullable()
+  .optional();
+
+export const grantLlmAccessSchema = z.object({
+  platformUserId: z.number().int().positive(),
+  maxBudget: z.number().min(0).max(1_000_000),
+  budgetDuration: budgetDurationSchema,
+  models: z.array(z.string().min(1).max(128)).nullable().optional(),
+  defaultKeyName: z.string().min(1).max(128).optional(),
+});
+
+export const updateLlmBudgetSchema = z.object({
+  maxBudget: z.number().min(0).max(1_000_000).optional(),
+  budgetDuration: budgetDurationSchema,
+  models: z.array(z.string().min(1).max(128)).nullable().optional(),
+});
+
+export const llmUserIdParamSchema = z.object({
+  userId: z.coerce.number().int().positive(),
+});
+
+export const llmKeyIdParamSchema = z.object({
+  id: z.coerce.number().int().positive(),
+});
+
+export const llmUsageQuerySchema = z.object({
+  startDate: z.string().min(1).max(32),
+  endDate: z.string().min(1).max(32),
+});

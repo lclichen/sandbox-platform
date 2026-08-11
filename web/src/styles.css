@@ -437,3 +437,88 @@ td.actions {
   padding: 10px 24px;
   background: var(--panel-2);
 }
+
+/* ---- LLM pages ---- */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.card .card-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.card .card-value {
+  font-size: 22px;
+  font-weight: 600;
+  margin-top: 6px;
+  word-break: break-all;
+}
+.card .muted.small {
+  font-size: 12px;
+  margin-top: 8px;
+  line-height: 1.4;
+}
+.progress {
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 3px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+.progress-bar:hover {
+  background: var(--accent);
+}
+.mono code {
+  font-size: 14px;
+}
+.info-banner {
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+.key-reveal {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  font-family: monospace;
+  font-size: 13px;
+  word-break: break-all;
+  user-select: all;
+  margin: 10px 0;
+}
+.reveal-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.reveal-pop {
+  position: absolute;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+  min-width: 320px;
+}
+code.muted {
+  color: var(--text-dim);
+}
+.muted.small.error {
+  color: var(--error);
+  margin-left: 6px;
+}
