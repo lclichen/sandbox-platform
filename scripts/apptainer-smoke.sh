@@ -126,18 +126,32 @@ if [ ! -f "$IMAGE" ]; then
   check "apptainer pull alpine:3.20" 'apptainer pull docker://alpine:3.20 "$IMAGE"'
 fi
 
-# 1. overlay 创建（SshExecutor.ensureOverlay；失败自动回退目录式）
-step "1. overlay 创建（稀疏 ext3，--size <diskGb*1024> MiB）"
-check "apptainer overlay create --size $((DISK_GB * 1024))" 'apptainer overlay create --size $((DISK_GB*1024)) "$OVERLAY"'
-check "稀疏文件：du 实际占用远小于 表观大小" 'apparent=$(stat -c %s "$OVERLAY"); real=$(du -sb "$OVERLAY" | cut -f1); [ "$real" -lt $((apparent / 2)) ]'
-show "表观/实际大小" 'ls -lh "$OVERLAY"; du -h "$OVERLAY"'
-echo "  (若 overlay create 失败，平台会回退为目录 overlay：mkdir -p \"$OVERLAY\")"
+# 1. overlay 创建（SshExecutor.ensureOverlay：ext3 失败自动回退目录式）
+step "1. overlay 创建（稀疏 ext3，--size <diskGb*1024> MiB；失败回退目录 overlay）"
+if apptainer overlay create --size $((DISK_GB * 1024)) "$OVERLAY" >/tmp/asmoke.out 2>&1; then
+  PASS=$((PASS + 1)); printf '  \033[1;32mPASS\033[0m  %s\n' "overlay create（ext3 稀疏文件）"
+  check "稀疏文件：du 实际占用远小于 表观大小" 'apparent=$(stat -c %s "$OVERLAY"); real=$(du -sb "$OVERLAY" | cut -f1); [ "$real" -lt $((apparent / 2)) ]'
+  show "表观/实际大小" 'ls -lh "$OVERLAY"; du -h "$OVERLAY"'
+else
+  # 与平台 ensureOverlay 一致：rootless 建 ext3 需 fakeroot，失败回退目录 overlay
+  printf '  \033[1;33mINFO\033[0m  overlay create 失败，回退目录式 overlay（与平台行为一致）\n'
+  sed 's/^/        /' /tmp/asmoke.out | head -3
+  rm -f "$OVERLAY" 2>/dev/null
+  mkdir -p "$OVERLAY"
+  PASS=$((PASS + 1)); printf '  \033[1;32mPASS\033[0m  %s\n' "overlay 目录就绪（fallback）"
+fi
 
 # 2. instance start（SshExecutor.startInstance）
 step "2. instance start（隔离参数: ${ISOLATION[*]:-无}）"
 check "instance start" '${START_BASE} --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
 check "instance list 可见 RUNNING" 'apptainer instance list | grep -q "$INSTANCE"'
 show "instance list" 'apptainer instance list'
+if ! apptainer instance list | grep -q "$INSTANCE"; then
+  echo "  ⚠️  实例未存活。常见原因："
+  echo "     a) 镜像缺少 %startscript 保活（直接 docker 镜像 build 且无 .def 时，instance 秒退）"
+  echo "        → 用 .def 配方重建，并加:  %startscript  exec sleep infinity"
+  echo "     b) 第 1 步 overlay 不可用（本脚本已自动回退目录 overlay，见上）"
+fi
 
 # 3. 工作区写入 —— rootless 下的关键验证点
 step "3. /workspace 写入（writeFile 的 base64 管道；rootless 需 fakeroot）"
