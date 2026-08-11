@@ -2,7 +2,9 @@
  * SshExecutor: preferred production executor.
  *
  * Connects (via node-ssh) to the host node that runs Apptainer, and executes
- * `apptainer exec <instance> <cmd>` / `apptainer instance start|stop` etc.
+ * `apptainer exec instance://<instance> <cmd>` / `apptainer instance start|stop`
+ * etc. (instances are addressed via the instance:// URI — a bare instance
+ * name is treated as an image path by `apptainer exec`).
  * File operations are implemented as base64-piped shell commands (robust
  * against binary content and quoting), mirroring the pattern in pi's ssh.ts
  * example.
@@ -194,7 +196,7 @@ export class SshExecutor implements SandboxExecutor {
   async readFile(handle: ContainerHandle, path: string): Promise<Buffer> {
     await this.connect(handle.node);
     const r = await this.execRemote(
-      `apptainer exec ${shellQuote(handle.id)} base64 ${shellQuote(path)} 2>/dev/null || apptainer exec ${shellQuote(handle.id)} cat ${shellQuote(path)} | base64`,
+      `apptainer exec instance://${shellQuote(handle.id)} base64 ${shellQuote(path)} 2>/dev/null || apptainer exec instance://${shellQuote(handle.id)} cat ${shellQuote(path)} | base64`,
     );
     if (r.code !== 0) throw new Error(`readFile failed: ${r.stderr}`);
     return Buffer.from(r.stdout.replace(/\s/g, ""), "base64");
@@ -205,19 +207,19 @@ export class SshExecutor implements SandboxExecutor {
     const b64 = content.toString("base64");
     const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".";
     await this.execRemote(
-      `apptainer exec ${shellQuote(handle.id)} sh -c 'mkdir -p ${shellQuote(parent)} && echo ${shellQuote(b64)} | base64 -d > ${shellQuote(path)}'`,
+      `apptainer exec instance://${shellQuote(handle.id)} sh -c 'mkdir -p ${shellQuote(parent)} && echo ${shellQuote(b64)} | base64 -d > ${shellQuote(path)}'`,
     );
   }
 
   async access(handle: ContainerHandle, path: string): Promise<void> {
     await this.connect(handle.node);
-    const r = await this.execRemote(`apptainer exec ${shellQuote(handle.id)} test -e ${shellQuote(path)}`);
+    const r = await this.execRemote(`apptainer exec instance://${shellQuote(handle.id)} test -e ${shellQuote(path)}`);
     if (r.code !== 0) throw new Error(`access failed: ${path}`);
   }
 
   async readdir(handle: ContainerHandle, path: string): Promise<string[]> {
     await this.connect(handle.node);
-    const r = await this.execRemote(`apptainer exec ${shellQuote(handle.id)} ls -1 ${shellQuote(path)}`);
+    const r = await this.execRemote(`apptainer exec instance://${shellQuote(handle.id)} ls -1 ${shellQuote(path)}`);
     if (r.code !== 0) throw new Error(`readdir failed: ${r.stderr}`);
     return r.stdout.split("\n").filter(Boolean);
   }
@@ -225,7 +227,7 @@ export class SshExecutor implements SandboxExecutor {
   async stat(handle: ContainerHandle, path: string): Promise<FileStat> {
     await this.connect(handle.node);
     const r = await this.execRemote(
-      `apptainer exec ${shellQuote(handle.id)} stat -c '%F %s %Y' ${shellQuote(path)}`,
+      `apptainer exec instance://${shellQuote(handle.id)} stat -c '%F %s %Y' ${shellQuote(path)}`,
     );
     if (r.code !== 0) throw new Error(`stat failed: ${r.stderr}`);
     const [type, size, mtime] = r.stdout.trim().split(/\s+/);
@@ -240,7 +242,7 @@ export class SshExecutor implements SandboxExecutor {
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {
     await this.connect(handle.node);
     const cwdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
-    const wrapped = `apptainer exec ${shellQuote(handle.id)} sh -c ${shellQuote(cwdPrefix + command)}`;
+    const wrapped = `apptainer exec instance://${shellQuote(handle.id)} sh -c ${shellQuote(cwdPrefix + command)}`;
     // node-ssh execCommand is non-streaming at this layer; collect buffers.
     const result = await this.ssh.execCommand(wrapped, { execOptions: opts.timeout ? { timeout: opts.timeout * 1000 } as never : undefined });
     return {

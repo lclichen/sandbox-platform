@@ -157,7 +157,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   }
 
   async readFile(handle: ContainerHandle, path: string): Promise<Buffer> {
-    const r = await this.runCli(["exec", handle.id, "cat", path]);
+    const r = await this.runCli(["exec", `instance://${handle.id}`, "cat", path]);
     return Buffer.from(r.stdout, "utf8");
   }
 
@@ -165,20 +165,20 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     const b64 = content.toString("base64");
     // P3-2: shell-quote the path so spaces/quotes in filenames cannot inject.
     const quoted = shellQuote(path);
-    await this.runCli(["exec", handle.id, "sh", "-c", `mkdir -p "$(dirname -- ${quoted})" && echo '${b64}' | base64 -d > ${quoted}`]);
+    await this.runCli(["exec", `instance://${handle.id}`, "sh", "-c", `mkdir -p "$(dirname -- ${quoted})" && echo '${b64}' | base64 -d > ${quoted}`]);
   }
 
   async access(handle: ContainerHandle, path: string): Promise<void> {
-    await this.runCli(["exec", handle.id, "test", "-e", path]);
+    await this.runCli(["exec", `instance://${handle.id}`, "test", "-e", path]);
   }
 
   async readdir(handle: ContainerHandle, path: string): Promise<string[]> {
-    const r = await this.runCli(["exec", handle.id, "ls", "-1", path]);
+    const r = await this.runCli(["exec", `instance://${handle.id}`, "ls", "-1", path]);
     return r.stdout.split("\n").filter(Boolean);
   }
 
   async stat(handle: ContainerHandle, path: string): Promise<FileStat> {
-    const r = await this.runCli(["exec", handle.id, "stat", "-c", "%F %s %Y", path]);
+    const r = await this.runCli(["exec", `instance://${handle.id}`, "stat", "-c", "%F %s %Y", path]);
     const [type, size, mtime] = r.stdout.trim().split(/\s+/);
     return {
       isDirectory: type === "directory",
@@ -189,7 +189,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   }
 
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {
-    const args = ["exec", handle.id, "sh", "-c", command];
+    const args = ["exec", `instance://${handle.id}`, "sh", "-c", command];
     return this.runCli(args, opts);
   }
 

@@ -155,27 +155,27 @@ fi
 
 # 3. 工作区写入 —— rootless 下的关键验证点
 step "3. /workspace 写入（writeFile 的 base64 管道；rootless 需 fakeroot）"
-check "mkdir -p + base64 -d 写 /workspace/hello.txt" 'apptainer exec "$INSTANCE" sh -c "mkdir -p /workspace && echo aGVsbG8K | base64 -d > /workspace/hello.txt"'
+check "mkdir -p + base64 -d 写 /workspace/hello.txt" 'apptainer exec "instance://$INSTANCE" sh -c "mkdir -p /workspace && echo aGVsbG8K | base64 -d > /workspace/hello.txt"'
 echo "  (若此步 Permission denied：实例 start 需加 --fakeroot，或改用目录式 overlay)"
 
 # 4. 读 / 存在性 / 列表 / stat
 step "4. 文件操作（readFile / access / readdir / stat）"
-check "readFile: base64 /workspace/hello.txt → aGVsbG8K" 'apptainer exec "$INSTANCE" base64 /workspace/hello.txt 2>/dev/null | grep -q "^aGVsbG8K$"'
-check "readFile 兜底: cat | base64" 'apptainer exec "$INSTANCE" cat /workspace/hello.txt | base64 | grep -q "^aGVsbG8K$"'
-check "access: test -e /workspace/hello.txt" 'apptainer exec "$INSTANCE" test -e /workspace/hello.txt'
-check "readdir: ls -1 /workspace 含 hello.txt" 'apptainer exec "$INSTANCE" ls -1 /workspace | grep -q "^hello.txt$"'
-check "stat: %F %s %Y → regular file" 'apptainer exec "$INSTANCE" stat -c "%F %s %Y" /workspace/hello.txt | grep -q "regular file"'
+check "readFile: base64 /workspace/hello.txt → aGVsbG8K" 'apptainer exec "instance://$INSTANCE" base64 /workspace/hello.txt 2>/dev/null | grep -q "^aGVsbG8K$"'
+check "readFile 兜底: cat | base64" 'apptainer exec "instance://$INSTANCE" cat /workspace/hello.txt | base64 | grep -q "^aGVsbG8K$"'
+check "access: test -e /workspace/hello.txt" 'apptainer exec "instance://$INSTANCE" test -e /workspace/hello.txt'
+check "readdir: ls -1 /workspace 含 hello.txt" 'apptainer exec "instance://$INSTANCE" ls -1 /workspace | grep -q "^hello.txt$"'
+check "stat: %F %s %Y → regular file" 'apptainer exec "instance://$INSTANCE" stat -c "%F %s %Y" /workspace/hello.txt | grep -q "regular file"'
 
 # 5. exec（bash 工具：cd <cwd> && <command>；非 0 退出透传）
 step "5. exec（含 cwd 前缀 + 退出码透传）"
-check "cd /workspace && pwd → /workspace" 'apptainer exec "$INSTANCE" sh -c "cd /workspace && pwd" | grep -q "^/workspace$"'
-check_fails "cd /tmp && false → 退出码非 0" 'apptainer exec "$INSTANCE" sh -c "cd /tmp && false"'
+check "cd /workspace && pwd → /workspace" 'apptainer exec "instance://$INSTANCE" sh -c "cd /workspace && pwd" | grep -q "^/workspace$"'
+check_fails "cd /tmp && false → 退出码非 0" 'apptainer exec "instance://$INSTANCE" sh -c "cd /tmp && false"'
 
 # 6. 持久化（覆盖层跨 stop/start 保留）
 step "6. 持久化（stop → start 后文件仍在 overlay 里）"
 check "instance stop" 'apptainer instance stop "$INSTANCE"'
 check "instance start（重启）" '${START_BASE} --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
-check "test -e /workspace/hello.txt（PERSIST-OK）" 'apptainer exec "$INSTANCE" test -e /workspace/hello.txt'
+check "test -e /workspace/hello.txt（PERSIST-OK）" 'apptainer exec "instance://$INSTANCE" test -e /workspace/hello.txt'
 
 # 7. snapshot / restore（Stop-Then-Copy；cp --sparse=always 保稀疏）
 step "7. snapshot / restore（复制 overlay + 宿主 du 统计大小）"
@@ -185,14 +185,14 @@ check "du -sb 快照目录 → 数字" 'du -sb "$SNAP" | cut -f1 | grep -qE "^[0
 show "快照大小（du -sb，稀疏 ext3 报表观大小≈${DISK_GB}G；目录 overlay 报实际字节）" 'du -sb "$SNAP" | cut -f1'
 check "restore: rm overlay + cp 快照回来" 'rm -rf "$OVERLAY" && cp -a --sparse=always "$SNAP" "$OVERLAY"'
 check "restore: 重启实例" '${START_BASE} --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
-check "restore 后文件仍在（RESTORE-OK）" 'apptainer exec "$INSTANCE" test -e /workspace/hello.txt'
+check "restore 后文件仍在（RESTORE-OK）" 'apptainer exec "instance://$INSTANCE" test -e /workspace/hello.txt'
 
 # 8. workspace 种子（create 带 seedFromPath 时：--bind <seed>:/workspace）
 step "8. workspace 种子 bind（--bind <seed>:/workspace）"
 check "准备种子目录" 'rm -rf "$SEED_DIR" && mkdir -p "$SEED_DIR" && cp /etc/hostname "$SEED_DIR/seed-marker"'
 check "instance stop（重新 bind 启动）" 'apptainer instance stop "$INSTANCE"'
 check "instance start --bind seed:/workspace" '${START_BASE} --overlay "$OVERLAY" --bind "$SEED_DIR:/workspace" "$IMAGE" "$INSTANCE"'
-check "/workspace 可见种子文件" 'apptainer exec "$INSTANCE" ls -1 /workspace | grep -q "^seed-marker$"'
+check "/workspace 可见种子文件" 'apptainer exec "instance://$INSTANCE" ls -1 /workspace | grep -q "^seed-marker$"'
 
 # 9. destroy（SshExecutor.destroy 的命令序列）
 step "9. destroy（instance stop || true + rm overlay）"
