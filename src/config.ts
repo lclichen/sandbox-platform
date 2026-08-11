@@ -82,6 +82,10 @@ export interface AppConfig {
       overlayBaseDir: string;
       imageBaseDir: string;
       workspaceBaseDir: string;
+      /** Append --cpus/--memory to instance start. Requires cgroup support on
+       *  the host (setuid install or cgroups v2); rootless + cgroup v1 fails
+       *  with "rootless cgroups requires cgroups v2", so default OFF. */
+      resourceLimits: boolean;
     };
   };
   reaper: {
@@ -91,6 +95,22 @@ export interface AppConfig {
     autoStopSnapshot: boolean;
     snapshotTier: string;
     auditRetentionDays: number;
+  };
+  llm: {
+    /** Master switch. When false, all /api/v1/*llm* routes return 503. */
+    enabled: boolean;
+    /** AES-256-GCM key (64 hex chars) for encrypting LiteLLM virtual-key plaintext. */
+    encryptionKey: string | undefined;
+    litellm: {
+      /** Endpoint the platform uses to call LiteLLM management APIs. */
+      baseUrl: string;
+      /** Endpoint given to users/containers to drive LLM traffic directly. */
+      publicBaseUrl: string;
+      /** LiteLLM master key (sk-...), used to authenticate management calls. */
+      masterKey: string | undefined;
+      /** Per-request timeout for LiteLLM calls. */
+      timeoutMs: number;
+    };
   };
 }
 
@@ -139,6 +159,7 @@ export function loadConfig(): AppConfig {
         overlayBaseDir: required("OVERLAY_BASE_DIR", "./data/overlays"),
         imageBaseDir: required("IMAGE_BASE_DIR", "./data/images"),
         workspaceBaseDir: required("WORKSPACE_BASE_DIR", "./data/workspaces"),
+        resourceLimits: bool("APPTAINER_RESOURCE_LIMITS", false),
       },
     },
     reaper: {
@@ -148,6 +169,16 @@ export function loadConfig(): AppConfig {
       autoStopSnapshot: bool("IDLE_AUTO_STOP_SNAPSHOT", true),
       snapshotTier: required("IDLE_AUTO_STOP_SNAPSHOT_TIER", "auto"),
       auditRetentionDays: int("AUDIT_RETENTION_DAYS", 90),
+    },
+    llm: {
+      enabled: bool("LLM_ENABLED", false),
+      encryptionKey: optional("LLM_ENCRYPTION_KEY"),
+      litellm: {
+        baseUrl: required("LITELLM_BASE_URL", "http://localhost:4000"),
+        publicBaseUrl: required("LITELLM_PUBLIC_BASE_URL", "http://localhost:4000"),
+        masterKey: optional("LITELLM_MASTER_KEY"),
+        timeoutMs: int("LITELLM_TIMEOUT_MS", 30000),
+      },
     },
   };
   return cached;
@@ -164,6 +195,8 @@ const KNOWN_WEAK_JWT_SECRETS = new Set([
   "change-me-in-production-please-use-a-long-random-string",
 ]);
 const INSECURE_DEFAULT_ADMIN_PASSWORD = "changeme123";
+/** LiteLLM master-key placeholders that must not survive into production. */
+const KNOWN_WEAK_LITELLM_KEYS = new Set(["sk-1234", "sk-123456"]);
 
 /**
  * Fail fast in production when secrets are left at their known-insecure
@@ -184,6 +217,22 @@ export function assertSecureProductionConfig(config: AppConfig): string[] {
     problems.push(
       "SEED_ADMIN_PASSWORD is set to the insecure default 'changeme123'. Set a strong password in .env.",
     );
+  }
+  // LLM integration (optional). When enabled in production, both the LiteLLM
+  // master key and the local encryption key must be real secrets.
+  if (config.llm.enabled) {
+    const mk = config.llm.litellm.masterKey;
+    if (!mk || KNOWN_WEAK_LITELLM_KEYS.has(mk)) {
+      problems.push(
+        "LITELLM_MASTER_KEY is missing or a known placeholder. Generate one with: openssl rand -hex 24 (must start with 'sk-').",
+      );
+    }
+    const ek = config.llm.encryptionKey;
+    if (!ek || ek.length !== 64 || !/^[0-9a-fA-F]+$/.test(ek)) {
+      problems.push(
+        "LLM_ENCRYPTION_KEY must be 64 hex chars (32 bytes) when LLM_ENABLED=true. Generate with: openssl rand -hex 32",
+      );
+    }
   }
   return problems;
 }

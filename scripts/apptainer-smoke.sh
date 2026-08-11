@@ -31,12 +31,18 @@ DISK_GB="${SMOKE_DISK_GB:-5}"                  # 对应容器的 diskGb
 OVERLAY_DIR="${SMOKE_OVERLAY_DIR:-/srv/apptainer/overlays}"
 SEED_DIR="${SMOKE_SEED_DIR:-/srv/apptainer/workspace-seeds/${INSTANCE}}"
 IMAGE="${SMOKE_IMAGE:-/srv/apptainer/images/alpine_3.20.sif}"
+# 资源限额（--cpus/--memory）依赖 cgroup：rootless + 宿主 cgroup v1 时
+# instance start 直接失败（"rootless cgroups requires cgroups v2"）。
+# 默认不传（与平台 APPTAINER_RESOURCE_LIMITS=false 一致）；在 setuid 安装
+# 或 cgroups v2 宿主上用环境变量开启: SMOKE_CPUS=2 SMOKE_MEMORY=2048
+SMOKE_CPUS="${SMOKE_CPUS:-}"
+SMOKE_MEMORY="${SMOKE_MEMORY:-}"
 
 OVERLAY="${OVERLAY_DIR}/${INSTANCE}.ext3"
 SNAP="${OVERLAY}.snap-smoke"
 
 # 生产执行器变体:
-#   ssh:           --contain --no-mount hostfs,cwd --cpus N --memory MM
+#   ssh:           --contain --no-mount hostfs,cwd
 #   apptainer-cli: 无隔离参数（同机部署）
 ISOLATION=("--contain" "--no-mount" "hostfs,cwd")
 for arg in "$@"; do
@@ -47,8 +53,15 @@ for arg in "$@"; do
   esac
 done
 
+# bash -c 子 shell 不继承数组，把启动参数拼成字符串再 export。
+ISOLATION_STR="${ISOLATION[*]:-}"
+LIMIT_STR=""
+if [ -n "$SMOKE_CPUS" ]; then LIMIT_STR+=" --cpus $SMOKE_CPUS"; fi
+if [ -n "$SMOKE_MEMORY" ]; then LIMIT_STR+=" --memory ${SMOKE_MEMORY}M"; fi
+START_BASE="apptainer instance start${ISOLATION_STR:+ $ISOLATION_STR}${LIMIT_STR}"
+
 # 供 bash -c 命令串引用
-export INSTANCE DISK_GB OVERLAY_DIR OVERLAY SNAP IMAGE SEED_DIR
+export INSTANCE DISK_GB OVERLAY_DIR OVERLAY SNAP IMAGE SEED_DIR START_BASE
 
 PASS=0
 FAIL=0
@@ -122,7 +135,7 @@ echo "  (若 overlay create 失败，平台会回退为目录 overlay：mkdir -p
 
 # 2. instance start（SshExecutor.startInstance）
 step "2. instance start（隔离参数: ${ISOLATION[*]:-无}）"
-check "instance start" 'apptainer instance start "${ISOLATION[@]}" --cpus 2 --memory 2048M --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
+check "instance start" '${START_BASE} --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
 check "instance list 可见 RUNNING" 'apptainer instance list | grep -q "$INSTANCE"'
 show "instance list" 'apptainer instance list'
 
@@ -147,7 +160,7 @@ check_fails "cd /tmp && false → 退出码非 0" 'apptainer exec "$INSTANCE" sh
 # 6. 持久化（覆盖层跨 stop/start 保留）
 step "6. 持久化（stop → start 后文件仍在 overlay 里）"
 check "instance stop" 'apptainer instance stop "$INSTANCE"'
-check "instance start（重启）" 'apptainer instance start "${ISOLATION[@]}" --cpus 2 --memory 2048M --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
+check "instance start（重启）" '${START_BASE} --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
 check "test -e /workspace/hello.txt（PERSIST-OK）" 'apptainer exec "$INSTANCE" test -e /workspace/hello.txt'
 
 # 7. snapshot / restore（Stop-Then-Copy；cp --sparse=always 保稀疏）
@@ -157,14 +170,14 @@ check "cp -a --sparse=always → 快照" 'rm -rf "$SNAP" && cp -a --sparse=alway
 check "du -sb 快照目录 → 数字" 'du -sb "$SNAP" | cut -f1 | grep -qE "^[0-9]+$"'
 show "快照大小（du -sb，稀疏 ext3 报表观大小≈${DISK_GB}G；目录 overlay 报实际字节）" 'du -sb "$SNAP" | cut -f1'
 check "restore: rm overlay + cp 快照回来" 'rm -rf "$OVERLAY" && cp -a --sparse=always "$SNAP" "$OVERLAY"'
-check "restore: 重启实例" 'apptainer instance start "${ISOLATION[@]}" --cpus 2 --memory 2048M --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
+check "restore: 重启实例" '${START_BASE} --overlay "$OVERLAY" "$IMAGE" "$INSTANCE"'
 check "restore 后文件仍在（RESTORE-OK）" 'apptainer exec "$INSTANCE" test -e /workspace/hello.txt'
 
 # 8. workspace 种子（create 带 seedFromPath 时：--bind <seed>:/workspace）
 step "8. workspace 种子 bind（--bind <seed>:/workspace）"
 check "准备种子目录" 'rm -rf "$SEED_DIR" && mkdir -p "$SEED_DIR" && cp /etc/hostname "$SEED_DIR/seed-marker"'
 check "instance stop（重新 bind 启动）" 'apptainer instance stop "$INSTANCE"'
-check "instance start --bind seed:/workspace" 'apptainer instance start "${ISOLATION[@]}" --overlay "$OVERLAY" --bind "$SEED_DIR:/workspace" "$IMAGE" "$INSTANCE"'
+check "instance start --bind seed:/workspace" '${START_BASE} --overlay "$OVERLAY" --bind "$SEED_DIR:/workspace" "$IMAGE" "$INSTANCE"'
 check "/workspace 可见种子文件" 'apptainer exec "$INSTANCE" ls -1 /workspace | grep -q "^seed-marker$"'
 
 # 9. destroy（SshExecutor.destroy 的命令序列）

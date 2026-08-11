@@ -27,12 +27,14 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   private readonly bin: string;
   private readonly overlayBase: string;
   private readonly snapshotBase: string;
+  private readonly resourceLimits: boolean;
 
   constructor() {
     const config = loadConfig();
     this.bin = config.executor.apptainer.bin;
     this.overlayBase = config.executor.apptainer.overlayBaseDir;
     this.snapshotBase = `${config.executor.apptainer.overlayBaseDir}/snapshots`;
+    this.resourceLimits = config.executor.apptainer.resourceLimits;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -67,8 +69,11 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     }
     await this.runCli([
       "instance", "start",
-      ...(req.cpu ? ["--cpus", String(req.cpu)] : []),
-      ...(req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
+      // Resource limits need cgroup support; only apply when enabled (default
+      // OFF: rootless + cgroup-v1 hosts fail with "rootless cgroups requires
+      // cgroups v2").
+      ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
+      ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       "--overlay", overlayPath,
       ...bindArgs,
       req.imagePath,
@@ -142,8 +147,8 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await cp(snapshot.overlayPath, overlayPath, { recursive: true });
     await this.runCli([
       "instance", "start",
-      ...(req.cpu ? ["--cpus", String(req.cpu)] : []),
-      ...(req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
+      ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
+      ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       "--overlay", overlayPath,
       req.imagePath,
       req.id,

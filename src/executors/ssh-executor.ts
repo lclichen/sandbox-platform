@@ -38,6 +38,7 @@ export class SshExecutor implements SandboxExecutor {
   private readonly username?: string;
   private readonly privateKeyPath?: string;
   private readonly password?: string;
+  private readonly resourceLimits: boolean;
 
   constructor() {
     const config = loadConfig();
@@ -47,6 +48,7 @@ export class SshExecutor implements SandboxExecutor {
     this.username = config.executor.ssh.username;
     this.privateKeyPath = config.executor.ssh.privateKeyPath;
     this.password = config.executor.ssh.password;
+    this.resourceLimits = config.executor.apptainer.resourceLimits;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -134,8 +136,11 @@ export class SshExecutor implements SandboxExecutor {
     memoryMb?: number,
     extraOpts = "",
   ): Promise<void> {
-    const cpuOpt = cpu ? `--cpus ${cpu}` : "";
-    const memOpt = memoryMb ? `--memory ${memoryMb}M` : "";
+    // Resource limits need cgroup support; only apply when enabled (default
+    // OFF: rootless + cgroup-v1 hosts fail instance start with "rootless
+    // cgroups requires cgroups v2").
+    const cpuOpt = this.resourceLimits && cpu ? `--cpus ${cpu}` : "";
+    const memOpt = this.resourceLimits && memoryMb ? `--memory ${memoryMb}M` : "";
     await this.execRemote(
       `apptainer instance start --contain --no-mount hostfs,cwd ${cpuOpt} ${memOpt} --overlay ${shellQuote(overlayPath)} ${extraOpts} ${shellQuote(imagePath)} ${shellQuote(id)}`,
     );
