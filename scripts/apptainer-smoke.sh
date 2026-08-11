@@ -130,7 +130,9 @@ fi
 step "1. overlay 创建（稀疏 ext3，--size <diskGb*1024> MiB；失败回退目录 overlay）"
 if apptainer overlay create --size $((DISK_GB * 1024)) "$OVERLAY" >/tmp/asmoke.out 2>&1; then
   PASS=$((PASS + 1)); printf '  \033[1;32mPASS\033[0m  %s\n' "overlay create（ext3 稀疏文件）"
-  check "稀疏文件：du 实际占用远小于 表观大小" 'apparent=$(stat -c %s "$OVERLAY"); real=$(du -sb "$OVERLAY" | cut -f1); [ "$real" -lt $((apparent / 2)) ]'
+  # 稀疏性验证：du -sB1 = 实际占用字节（-b/--apparent-size 才是表观大小，
+  # 拿表观比表观永远不成立）；稀疏 ext3 实际占用应远小于表观 5G。
+  check "稀疏文件：du 实际占用远小于 表观大小" 'apparent=$(stat -c %s "$OVERLAY"); real=$(du -sB1 "$OVERLAY" | cut -f1); [ "$real" -lt $((apparent / 2)) ]'
   show "表观/实际大小" 'ls -lh "$OVERLAY"; du -h "$OVERLAY"'
 else
   # 与平台 ensureOverlay 一致：rootless 建 ext3 需 fakeroot，失败回退目录 overlay
