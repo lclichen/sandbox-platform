@@ -243,14 +243,34 @@ export class SshExecutor implements SandboxExecutor {
     await this.connect(handle.node);
     const cwdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
     const wrapped = `apptainer exec instance://${shellQuote(handle.id)} sh -c ${shellQuote(cwdPrefix + command)}`;
-    // node-ssh execCommand is non-streaming at this layer; collect buffers.
-    const result = await this.ssh.execCommand(wrapped, { execOptions: opts.timeout ? { timeout: opts.timeout * 1000 } as never : undefined });
-    return {
-      exitCode: result.code ?? -1,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? "",
-      timedOut: false,
+    // node-ssh's execOptions.timeout kills the process but doesn't surface a
+    // distinct "timed out" signal (result.code is typically null afterward).
+    // Track the deadline ourselves so callers get an accurate timedOut flag,
+    // matching the mock + apptainer-cli executors.
+    const timeoutMs = opts.timeout ? opts.timeout * 1000 : undefined;
+    const deadline = timeoutMs ? Date.now() + timeoutMs : undefined;
+    let timedOut = false;
+    const onTimeout = () => {
+      timedOut = true;
     };
+    const timer = deadline ? setTimeout(onTimeout, timeoutMs!) : undefined;
+    if (timer) timer.unref?.();
+    try {
+      const result = await this.ssh.execCommand(wrapped, {
+        execOptions: opts.timeout ? { timeout: opts.timeout * 1000 } as never : undefined,
+      });
+      // If our own deadline fired (or has passed by the time execCommand
+      // returned), treat it as a timeout regardless of node-ssh's signal.
+      if (deadline && (timedOut || Date.now() >= deadline)) timedOut = true;
+      return {
+        exitCode: result.code ?? -1,
+        stdout: result.stdout ?? "",
+        stderr: result.stderr ?? "",
+        timedOut,
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 

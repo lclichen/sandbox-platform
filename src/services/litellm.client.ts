@@ -130,10 +130,42 @@ export function createLitellmClient(opts: LitellmClientOptions) {
    * Core request. Throws mapped HttpErrors; never resolves on a non-2xx that
    * originates from LiteLLM. `method` defaults to POST because several LiteLLM
    * mutating endpoints (notably /key/delete, /model/delete) are POST, not DELETE.
+   *
+   * Idempotent GETs are retried on transient network failures (the request never
+   * reached LiteLLM, so retrying can't double-apply a side effect). Mutating
+   * calls are NOT retried — a /key/generate retry could mint a duplicate key.
    */
   async function request<T>(
     path: string,
     init: { method?: "GET" | "POST" | "PATCH" | "DELETE"; query?: Record<string, string | number | undefined | null>; body?: unknown } = {},
+  ): Promise<T> {
+    const method = init.method ?? "POST";
+    const retryable = method === "GET";
+    const attempts = retryable ? 3 : 1; // 1 try + 2 retries for GETs.
+    const backoffMs = [200, 800];
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        return await singleRequest<T>(path, init);
+      } catch (err) {
+        lastErr = err;
+        // Only retry on network-level unreachable errors (never on mapped
+        // business errors from LiteLLM — those mean the request landed).
+        const isUnreachable = err instanceof HttpError && err.code === "llm_unreachable";
+        if (!retryable || !isUnreachable || attempt === attempts - 1) throw err;
+        await sleep(backoffMs[attempt] ?? 800);
+      }
+    }
+    throw lastErr;
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function singleRequest<T>(
+    path: string,
+    init: { method?: "GET" | "POST" | "PATCH" | "DELETE"; query?: Record<string, string | number | undefined | null>; body?: unknown },
   ): Promise<T> {
     const url = `${base}${path}${buildQuery(init.query ?? {})}`;
     const controller = new AbortController();

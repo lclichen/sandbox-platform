@@ -48,6 +48,8 @@ export interface AppConfig {
   host: string;
   /** Number of reverse-proxy hops (0 = direct client). See rate-limit.ts. */
   trustProxy: number;
+  /** Optional bearer token guarding /metrics. Unset = open (dev only). */
+  metricsToken: string | undefined;
   db: {
     dialect: DbDialect;
     sqlitePath: string;
@@ -67,6 +69,7 @@ export interface AppConfig {
     loginPerMinute: number;
     refreshPerMinute: number;
     bashPerMinute: number;
+    llmRevealPerMinute: number;
   };
   executor: {
     kind: ExecutorKind;
@@ -124,6 +127,7 @@ export function loadConfig(): AppConfig {
     port: int("PORT", 3000),
     host: required("HOST", "0.0.0.0"),
     trustProxy: int("TRUST_PROXY", 0),
+    metricsToken: optional("METRICS_TOKEN"),
     db: {
       dialect: asDialect(required("DB_DIALECT", "sqlite")),
       sqlitePath: required("DB_SQLITE_PATH", "./data/sandbox.db"),
@@ -144,6 +148,7 @@ export function loadConfig(): AppConfig {
       loginPerMinute: int("RATE_LIMIT_LOGIN_PER_MINUTE", 10),
       refreshPerMinute: int("RATE_LIMIT_REFRESH_PER_MINUTE", 30),
       bashPerMinute: int("RATE_LIMIT_BASH_PER_MINUTE", 60),
+      llmRevealPerMinute: int("RATE_LIMIT_LLM_REVEAL_PER_MINUTE", 5),
     },
     executor: {
       kind: asExecutorKind(required("EXECUTOR_KIND", "mock")),

@@ -253,8 +253,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
         await executor.destroy(handle);
       } catch (err) {
         // Even if destroy fails on the runtime side, mark destroyed in DB.
-        // eslint-disable-next-line no-console
-        console.warn("executor destroy error:", err);
+        logger.warn({ err, containerId: id }, "executor destroy error (container still marked destroyed)");
       }
       await db.run(
         "UPDATE containers SET status = 'destroyed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",

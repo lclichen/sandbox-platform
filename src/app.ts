@@ -17,7 +17,7 @@ import { logger } from "./utils/logger.ts";
 import { loadConfig } from "./config.ts";
 import { createDatabase, type Database } from "./db/driver.ts";
 import { getExecutor, type SandboxExecutorRef } from "./executors/index.ts";
-import { loginLimiter, refreshLimiter, bashLimiter } from "./middleware/rate-limit.ts";
+import { loginLimiter, refreshLimiter, bashLimiter, llmRevealLimiter } from "./middleware/rate-limit.ts";
 import { metricsMiddleware, metricsHandler, registry } from "./middleware/metrics.ts";
 import { authRouter } from "./routes/auth.routes.ts";
 import { usersRouter } from "./routes/users.routes.ts";
@@ -125,8 +125,17 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     }
   });
 
-  // Prometheus metrics (P2-2).
-  app.get("/metrics", async (_req: Request, res: Response) => {
+  // Prometheus metrics (P2-2). Guarded by METRICS_TOKEN when set (bearer auth);
+  // left open in development otherwise. Promote closing this in production.
+  app.get("/metrics", async (req: Request, res: Response) => {
+    const token = loadConfig().metricsToken;
+    if (token) {
+      const sent = req.headers.authorization;
+      if (sent !== `Bearer ${token}`) {
+        res.status(401).json({ code: "unauthorized", message: "Metrics require a bearer token (METRICS_TOKEN)." });
+        return;
+      }
+    }
     try {
       const body = await metricsHandler(db);
       res.setHeader("Content-Type", registry.contentType);
@@ -149,6 +158,8 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.use("/api/v1/auth/login", loginLimiter());
   app.use("/api/v1/auth/refresh", refreshLimiter());
   app.use("/api/v1/containers/:id/tools/bash", bashLimiter());
+  // The reveal endpoint returns decrypted plaintext; cap it tightly.
+  app.use("/api/v1/llm/me/keys/:id/reveal", llmRevealLimiter());
 
   // API routers. Each receives the db + executor via req.app.locals.
   app.use("/api/v1/auth", authRouter());

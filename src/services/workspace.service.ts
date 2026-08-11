@@ -14,6 +14,7 @@
 import type { Database, SqlValue } from "../db/driver.ts";
 import { createQuotaService } from "./quota.service.ts";
 import { NotFoundError, ConflictError, BadRequestError } from "../utils/errors.ts";
+import { logger } from "../utils/logger.ts";
 import * as storage from "./workspace-storage.ts";
 import type { WorkspaceFileEntry } from "./workspace-storage.ts";
 
@@ -202,8 +203,7 @@ export function createWorkspaceService(db: Database) {
       try {
         await storage.removeWorkspaceDir(ws.user_id, id);
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("workspace dir removal failed:", err);
+        logger.warn({ err, workspaceId: id }, "workspace dir removal failed (row still deleted)");
       }
       await db.run("DELETE FROM workspaces WHERE id = ?", id);
     },

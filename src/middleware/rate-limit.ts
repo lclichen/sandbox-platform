@@ -2,9 +2,13 @@
  * Rate limiting middleware (P1-1).
  *
  * IP-dimension limits for the brute-force / abuse surfaces:
- *   - POST /auth/login     -> loginPerMinute  (default 10/min)
- *   - POST /auth/refresh   -> refreshPerMinute (default 30/min)
- *   - tools/bash + stream  -> bashPerMinute    (default 60/min)
+ *   - POST /auth/login            -> loginPerMinute  (default 10/min)
+ *   - POST /auth/refresh          -> refreshPerMinute (default 30/min)
+ *   - tools/bash + stream         -> bashPerMinute    (default 60/min)
+ *   - POST /llm/me/keys/:id/reveal -> llmRevealPerMinute (default 5/min)
+ *
+ * The reveal limiter caps a sensitive plaintext-returning endpoint so a stolen
+ * token cannot hammer it to extract LLM virtual keys.
  *
  * Enabled by default in production (NODE_ENV=production); development can opt
  * in with RATE_LIMIT_ENABLED=true. When disabled, the middleware is a no-op so
@@ -45,4 +49,9 @@ export function refreshLimiter(): RequestHandler {
 export function bashLimiter(): RequestHandler {
   const c = loadConfig();
   return c.rateLimit.enabled ? limiter(60_000, c.rateLimit.bashPerMinute) : noop();
+}
+
+export function llmRevealLimiter(): RequestHandler {
+  const c = loadConfig();
+  return c.rateLimit.enabled ? limiter(60_000, c.rateLimit.llmRevealPerMinute) : noop();
 }

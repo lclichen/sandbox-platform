@@ -31,6 +31,7 @@ const migrationModules: Array<{ id: string; module: string }> = [
   { id: "0006_refresh_family", module: "./migrations/0006_refresh_family.ts" },
   { id: "0007_audit_chain", module: "./migrations/0007_audit_chain.ts" },
   { id: "0008_llm_bindings", module: "./migrations/0008_llm_bindings.ts" },
+  { id: "0009_audit_soft_purge", module: "./migrations/0009_audit_soft_purge.ts" },
 ];
 
 async function ensureSchemaMigrationsTable(db: Database): Promise<void> {

@@ -14,6 +14,17 @@ import { loadConfig, assertSecureProductionConfig } from "./config.ts";
 async function main() {
   const config = loadConfig();
 
+  // Process-level error capture: surface unhandled rejections / exceptions in
+  // the structured log before the process exits (Node's default is to exit on
+  // unhandledRejection since v15, but without a handler the diagnostic is lost).
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ reason: reason instanceof Error ? reason.stack : String(reason) }, "Unhandled promise rejection.");
+  });
+  process.on("uncaughtException", (err) => {
+    logger.error({ err: err.stack ?? err.message }, "Uncaught exception; exiting.");
+    process.exit(1);
+  });
+
   // Fail fast in production when known-insecure secrets are left in place
   // (public signing key / default admin password = instant compromise).
   const secretProblems = assertSecureProductionConfig(config);
