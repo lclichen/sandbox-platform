@@ -100,6 +100,14 @@ echo "== 环境: instance=$INSTANCE overlay=$OVERLAY image=$IMAGE =="
 step "0. 前置清理 + 版本"
 check "清理残留实例/overlay" 'apptainer instance stop "$INSTANCE" 2>/dev/null || true; rm -rf "$OVERLAY" "$SNAP" "$SEED_DIR"'
 check "apptainer --version" 'apptainer --version'
+# Preflight: rootless/fakeroot 启动 instance 依赖 cgroups v2（Rocky/RHEL8 默认 v1，
+# 直接报 "rootless cgroups requires cgroups v2"）。
+if [ "$(id -u)" != "0" ] && [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
+  echo "  ⚠️  宿主 cgroups 为 v1 且当前非 root：rootless/fakeroot 启动 instance 会失败"
+  echo "     修复 1（推荐）: sudo grubby --update-kernel=ALL --args=\"systemd.unified_cgroup_hierarchy=1\" && reboot"
+  echo "     修复 2: 管理员启用 apptainer setuid（apptainer config global --set \"allow setuid\" yes）"
+  echo "     修复 3: 以 root 运行本脚本（不推荐用于生产）"
+fi
 if [ ! -f "$IMAGE" ]; then
   echo "  (未找到 $IMAGE，自动 pull alpine:3.20)"
   check "apptainer pull alpine:3.20" 'apptainer pull docker://alpine:3.20 "$IMAGE"'
