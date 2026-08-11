@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { containerPathToLocal } from "../../pi-sandbox-extension/lib/paths.ts";
+import { containerPathToLocal, toContainerPath } from "../../pi-sandbox-extension/lib/paths.ts";
 import { withContainerCwd } from "../../pi-sandbox-extension/lib/operations.ts";
 import {
   collectLocalFiles,
@@ -28,6 +28,63 @@ describe("containerPathToLocal (offline fallback)", () => {
     expect(containerPathToLocal("src/util.ts", cwd)).toBe("C:\\proj\\src\\util.ts");
     expect(containerPathToLocal(".", cwd)).toBe("C:\\proj");
     expect(containerPathToLocal("@/workspace/a.txt", cwd)).toBe("C:\\proj\\a.txt");
+  });
+
+  it("passes through paths pi already resolved to local absolute paths", () => {
+    // win32: pi's path.resolve("/workspace", rel) yields drive-absolute host
+    // paths — these are real local paths and must be used as-is.
+    expect(containerPathToLocal("D:\\workspace\\quicksort.py", "D:\\workspace")).toBe("D:\\workspace\\quicksort.py");
+    expect(containerPathToLocal("D:\\workspace\\workspace\\quicksort.py", "D:\\workspace")).toBe(
+      "D:\\workspace\\workspace\\quicksort.py",
+    );
+    expect(containerPathToLocal("C:\\other\\file.txt", "D:\\workspace")).toBe("C:\\other\\file.txt");
+    // POSIX host-absolute under the cwd is already local too.
+    expect(containerPathToLocal("/home/u/proj/src/a.ts", "/home/u/proj")).toBe("/home/u/proj/src/a.ts");
+  });
+});
+
+describe("toContainerPath (pi path un-mangling)", () => {
+  it("maps relative paths into the workspace root", () => {
+    expect(toContainerPath("quicksort.py")).toBe("/workspace/quicksort.py");
+    expect(toContainerPath("src/util.ts")).toBe("/workspace/src/util.ts");
+    expect(toContainerPath("@quicksort.py")).toBe("/workspace/quicksort.py");
+  });
+
+  it("keeps container-absolute paths unchanged", () => {
+    expect(toContainerPath("/workspace/quicksort.py")).toBe("/workspace/quicksort.py");
+    expect(toContainerPath("/workspace/src/a.ts")).toBe("/workspace/src/a.ts");
+    expect(toContainerPath("/etc/hostname")).toBe("/etc/hostname");
+  });
+
+  it("un-mangles win32 drive paths pi's path.resolve produces", () => {
+    const cwd = "D:\\workspace";
+    // write "quicksort.py" -> "D:\workspace\quicksort.py"
+    expect(toContainerPath("D:\\workspace\\quicksort.py", cwd)).toBe("/workspace/quicksort.py");
+    // read "workspace/quicksort.py" -> "D:\workspace\workspace\quicksort.py"
+    expect(toContainerPath("D:\\workspace\\workspace\\quicksort.py", cwd)).toBe("/workspace/quicksort.py");
+    expect(toContainerPath("D:\\workspace\\src\\util.ts", cwd)).toBe("/workspace/src/util.ts");
+    // model reads an absolute container path -> "D:\etc\hostname" on win32
+    expect(toContainerPath("D:\\etc\\hostname", cwd)).toBe("/etc/hostname");
+    expect(toContainerPath("D:\\workspace", cwd)).toBe("/workspace");
+  });
+
+  it("strips the local cwd from host-absolute paths (POSIX hosts)", () => {
+    const cwd = "/home/u/proj";
+    expect(toContainerPath("/home/u/proj/src/a.ts", cwd)).toBe("/workspace/src/a.ts");
+    expect(toContainerPath("/home/u/proj/quicksort.py", cwd)).toBe("/workspace/quicksort.py");
+  });
+
+  it("collapses a doubled workspace prefix", () => {
+    // "workspace/x" resolved against cwd /workspace doubles the prefix.
+    expect(toContainerPath("/workspace/workspace/quicksort.py")).toBe("/workspace/quicksort.py");
+    expect(toContainerPath("/workspace/workspace")).toBe("/workspace");
+    expect(toContainerPath("workspace/quicksort.py")).toBe("/workspace/quicksort.py");
+  });
+
+  it("maps the workspace root and dot to itself", () => {
+    expect(toContainerPath(".")).toBe("/workspace");
+    expect(toContainerPath("/workspace")).toBe("/workspace");
+    expect(toContainerPath("@/workspace")).toBe("/workspace");
   });
 });
 

@@ -14,6 +14,11 @@ import { describe, it, expect, afterEach } from "vitest";
 import { setupTestApp, teardownTestApp, adminToken, type TestContext } from "./helper.ts";
 import { PlatformClient } from "../../pi-sandbox-extension/lib/client.ts";
 import { createPlatformBashOps, withContainerCwd } from "../../pi-sandbox-extension/lib/operations.ts";
+import {
+  createPlatformReadOps,
+  createPlatformWriteOps,
+  createPlatformLsOps,
+} from "../../pi-sandbox-extension/lib/operations.ts";
 import { loadConfig, saveConfig, resetConfigCache } from "../../pi-sandbox-extension/lib/config.ts";
 
 let ctx: TestContext | undefined;
@@ -193,6 +198,53 @@ describe("pi-sandbox-extension client <-> platform", () => {
       expect(result.exitCode).toBe(0);
       // The command ran inside the container's workspace root.
       expect(output).toContain("workspace");
+    } finally {
+      await new Promise<void>((resolveFn) => server.close(() => resolveFn()));
+    }
+  });
+
+  it("un-mangles pi's win32-resolved paths before routing tool ops", async () => {
+    ctx = await setupTestApp();
+    const { createApp } = await import("../src/app.ts");
+    const http = (await import("node:http")).default;
+    const server = http.createServer((await createApp({ db: ctx.db, executor: ctx.app.locals.executor })).app);
+    await new Promise<void>((resolveFn) => server.listen(0, "127.0.0.1", resolveFn));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const url = `http://127.0.0.1:${port}`;
+
+    try {
+      saveConfig({ url });
+      const config = loadConfig(process.cwd());
+      const client = new PlatformClient(config);
+      await client.login("admin", "changeme123");
+      const created = await client.createContainer({ imageId: 1, name: "path-box" });
+      await client.connectContainer(created.id);
+
+      // The user's local project dir; pi creates the tools with cwd /workspace
+      // and node's path.resolve on win32 turns any input into "D:\workspace\..."
+      const sessionCwd = "D:\\workspace";
+      const write = createPlatformWriteOps(client, created.id, sessionCwd);
+      const read = createPlatformReadOps(client, created.id, sessionCwd);
+      const ls = createPlatformLsOps(client, created.id, sessionCwd);
+
+      // write "quicksort.py" arrives as "D:\workspace\quicksort.py".
+      await write.writeFile("D:\\workspace\\quicksort.py", "#!/usr/bin/env python3\nprint('hi')\n");
+
+      // read "workspace/quicksort.py" arrives as "D:\workspace\workspace\quicksort.py".
+      const buf = await read.readFile("D:\\workspace\\workspace\\quicksort.py");
+      expect(buf.toString("utf8")).toContain("print('hi')");
+
+      // access() on the mangled path resolves (previously "No access").
+      await expect(read.access("D:\\workspace\\workspace\\quicksort.py")).resolves.toBeUndefined();
+
+      // Absolute container paths pass through and hit the same file.
+      const viaAbs = await read.readFile("/workspace/quicksort.py");
+      expect(viaAbs.toString("utf8")).toContain("print('hi')");
+
+      // ls sees the file under the workspace root.
+      const names = await ls.readdir("D:\\workspace");
+      expect(names).toContain("quicksort.py");
     } finally {
       await new Promise<void>((resolveFn) => server.close(() => resolveFn()));
     }
