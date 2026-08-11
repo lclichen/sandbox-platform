@@ -129,9 +129,10 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await mkdir(dirname(dst), { recursive: true });
     await rm(dst, { recursive: true, force: true });
     await cp(handle.overlayPath, dst, { recursive: true });
-    // P3-2: report the real copied size (mirrors ssh-executor.ts).
-    const sizeRes = await this.runCli(["du", "-sb", dst]);
-    const sizeBytes = Number.parseInt(sizeRes.stdout.trim().split(/\s+/)[0] ?? "0", 10) || 0;
+    // P3-2: report the real copied size (mirrors ssh-executor.ts). du must run
+    // on the HOST — `apptainer du` is an image-usage command with no -sb flags
+    // and cannot measure a plain directory.
+    const sizeBytes = await this.hostDirSize(dst);
     return { id: `${handle.id}:${name}`, overlayPath: dst, sizeBytes };
   }
 
@@ -185,6 +186,22 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {
     const args = ["exec", handle.id, "sh", "-c", command];
     return this.runCli(args, opts);
+  }
+
+  /** Size of a snapshot dir in bytes, measured on the HOST (du -sb). */
+  private async hostDirSize(dir: string): Promise<number> {
+    return new Promise((resolveFn) => {
+      const child = spawn("du", ["-sb", dir], { windowsHide: true });
+      let out = "";
+      child.stdout.on("data", (d: Buffer) => {
+        out += d.toString("utf8");
+      });
+      child.on("error", () => resolveFn(0));
+      child.on("close", (code) => {
+        if (code !== 0) return resolveFn(0);
+        resolveFn(Number.parseInt(out.trim().split(/\s+/)[0] ?? "0", 10) || 0);
+      });
+    });
   }
 
   private runCli(args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
