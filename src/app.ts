@@ -18,7 +18,7 @@ import { loadConfig } from "./config.ts";
 import { createDatabase, type Database } from "./db/driver.ts";
 import { getExecutor, type SandboxExecutorRef } from "./executors/index.ts";
 import { loginLimiter, refreshLimiter, bashLimiter, llmRevealLimiter } from "./middleware/rate-limit.ts";
-import { metricsMiddleware, metricsHandler, registry } from "./middleware/metrics.ts";
+import { metricsMiddleware, metricsHandler, registry, recordLitellmHealth } from "./middleware/metrics.ts";
 import { authRouter } from "./routes/auth.routes.ts";
 import { usersRouter } from "./routes/users.routes.ts";
 import { quotasRouter } from "./routes/quotas.routes.ts";
@@ -117,7 +117,10 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
       let litellm: "disabled" | "ok" | "down" = "disabled";
       if (litellmClient) {
         litellm = (await litellmClient.health()) ? "ok" : "down";
+        recordLitellmHealth(litellm === "ok" ? "up" : "down");
         if (litellm === "down") throw new Error("LiteLLM unreachable");
+      } else {
+        recordLitellmHealth("disabled");
       }
       res.json({ status: "ready", dialect: db.dialect, executor: executor.kind, litellm });
     } catch {

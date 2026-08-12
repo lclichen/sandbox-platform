@@ -16,6 +16,7 @@
     "backup": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/backup.ts",
     "restore": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/restore.ts",
     "migrate-db": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/migrate-db.ts",
+    "rotate-llm-key": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/rotate-llm-key.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest --run",
     "test:watch": "vitest"

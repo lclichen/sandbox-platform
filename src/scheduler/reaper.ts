@@ -19,6 +19,7 @@ import { handleFromRow, type SandboxExecutor, type ContainerRowForExecutor } fro
 import { createContainerService } from "../services/container.service.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
+import { recordReaperReclaim } from "../middleware/metrics.ts";
 
 export interface ReaperSummary {
   scanned: number;
@@ -129,6 +130,7 @@ export function createReaper(db: Database, executor: SandboxExecutor): Reaper {
     }
 
     summary.purgedAuditRows = await purgeAuditLogs();
+    if (summary.reclaimed.length > 0) recordReaperReclaim(summary.reclaimed.length);
     return summary;
   }
 
