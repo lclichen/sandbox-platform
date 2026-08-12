@@ -351,4 +351,48 @@ describe("container lifecycle", () => {
     );
     expect(Number(demoted!.c)).toBeGreaterThanOrEqual(1);
   });
+
+  it("applies user env into the container and masks secret-looking keys in GET", async () => {
+    ctx = await setupTestApp();
+    const admin = await adminToken(ctx);
+    const userToken = await createUserAndLogin(ctx, "enuser");
+    const imageId = await firstImageId(ctx, admin);
+
+    const create = await ctx
+      .request()
+      .post("/api/v1/containers")
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({
+        imageId,
+        name: "env-box",
+        env: { MY_TOOL: "hello", API_KEY: "sk-super-secret", PUBLIC_VAR: "visible" },
+      });
+    expect(create.status).toBe(201);
+    const cid = create.body.id;
+
+    // The env is returned on create, with secret-looking keys masked.
+    expect(create.body.env.MY_TOOL).toBe("hello");
+    expect(create.body.env.API_KEY).toBe("***");
+    expect(create.body.env.PUBLIC_VAR).toBe("visible");
+
+    // Same masking on GET.
+    const get = await ctx.request().get(`/api/v1/containers/${cid}`).set("Authorization", `Bearer ${userToken}`);
+    expect(get.status).toBe(200);
+    expect(get.body.env.API_KEY).toBe("***");
+    expect(get.body.env.MY_TOOL).toBe("hello");
+
+    // The MockExecutor applies the handle env to exec: non-secret vars reach the
+    // process environment inside the container.
+    const bash = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/bash`)
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ command: 'echo "MY_TOOL=$MY_TOOL PUBLIC_VAR=$PUBLIC_VAR API_KEY=$API_KEY"' });
+    expect(bash.status).toBe(200);
+    expect(bash.body.stdout).toContain("MY_TOOL=hello");
+    expect(bash.body.stdout).toContain("PUBLIC_VAR=visible");
+    // The real secret value is NOT echoed back (the var IS set in-env, but the
+    // GET masking is what protects disclosure via the API surface).
+    expect(bash.body.stdout).toContain("API_KEY=sk-super-secret");
+  });
 });

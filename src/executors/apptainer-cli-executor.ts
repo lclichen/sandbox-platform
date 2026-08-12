@@ -74,12 +74,13 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       // cgroups v2").
       ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
+      ...envArgs(req.env),
       "--overlay", overlayPath,
       ...bindArgs,
       req.imagePath,
       req.id,
     ]);
-    return { id: req.id, node: "local", overlayPath, running: true, imagePath: req.imagePath };
+    return { id: req.id, node: "local", overlayPath, running: true, imagePath: req.imagePath, env: req.env };
   }
 
   /** Create a sparse ext3 overlay sized to diskGb (MiB); fall back to a dir. */
@@ -102,8 +103,8 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await mkdir(overlayPath, { recursive: true });
   }
 
-  async start(handle: ContainerHandle): Promise<void> {
-    const args = ["instance", "start", "--overlay", handle.overlayPath];
+  async start(handle: ContainerHandle, env?: Record<string, string>): Promise<void> {
+    const args = ["instance", "start", ...envArgs(env ?? handle.env), "--overlay", handle.overlayPath];
     if (handle.imagePath) args.push(handle.imagePath);
     else args.push(handle.overlayPath);
     args.push(handle.id);
@@ -257,4 +258,19 @@ export class ApptainerCliExecutor implements SandboxExecutor {
 /** Quote a string for POSIX sh (single-quote escaping). */
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Render `--env KEY=VALUE` arg pairs for apptainer instance start. The KEY is
+ * constrained to a conservative charset and VALUE is shell-quoted so a value
+ * cannot inject into the argv. Returns [] when empty.
+ */
+function envArgs(env?: Record<string, string>): string[] {
+  if (!env) return [];
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(k)) continue;
+    out.push("--env", `${k}=${shellQuote(String(v))}`);
+  }
+  return out;
 }

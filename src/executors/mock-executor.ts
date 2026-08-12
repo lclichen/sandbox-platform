@@ -97,13 +97,17 @@ export class MockExecutor implements SandboxExecutor {
       node: "mock-local",
       overlayPath: root,
       running: true,
+      env: req.env,
     };
     this.handles.set(handle.id, handle);
     logger.debug({ id: req.id, root }, "MockExecutor: container created");
     return handle;
   }
 
-  async start(handle: ContainerHandle): Promise<void> {
+  async start(handle: ContainerHandle, env?: Record<string, string>): Promise<void> {
+    // Apply any env overrides passed by the caller (e.g. re-applied on resume),
+    // else retain what was captured at create time.
+    if (env) handle.env = { ...(handle.env ?? {}), ...env };
     handle.running = true;
     this.handles.set(handle.id, handle);
   }
@@ -197,10 +201,16 @@ export class MockExecutor implements SandboxExecutor {
     const shellArgs = process.platform === "win32" && !shell.toLowerCase().includes("sh")
       ? ["/c", command]
       : ["-c", command];
+    // The handle passed in by tools.service is rebuilt from a DB row (no env);
+    // recover the create-time env from the internal map where the mock keeps
+    // the authoritative handle. Layer: process < stored handle env < per-cmd opts.
+    const stored = this.handles.get(handle.id);
+    const handleEnv = handle.env ?? stored?.env;
+    const mergedEnv = { ...process.env, ...(handleEnv ?? {}), ...(opts.env ?? {}) };
     return new Promise((resolveFn) => {
       const child = spawn(shell, shellArgs, {
         cwd,
-        env: { ...process.env, ...opts.env },
+        env: mergedEnv,
         windowsHide: true,
       });
       const stdoutChunks: Buffer[] = [];

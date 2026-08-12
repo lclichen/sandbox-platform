@@ -34,6 +34,7 @@ import { llmAdminRouter } from "./routes/llm.admin.routes.ts";
 import { llmRouter } from "./routes/llm.routes.ts";
 import { createLitellmClient, isLitellmConfigured, type LitellmClient } from "./services/litellm.client.ts";
 import { createLlmService } from "./services/llm.service.ts";
+import { type LlmEnvProvider } from "./services/container.service.ts";
 import { isValidKeyHex, type EncryptionKey } from "./utils/crypto.ts";
 
 export interface AppDeps {
@@ -62,6 +63,28 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     });
     llmEncryptionKey = cfg.llm.encryptionKey;
   }
+
+  // LLM env-injection hook for container create: when the owner has an active
+  // binding + key, surface SANDBOX_LLM_BASE_URL / SANDBOX_LLM_API_KEY into the
+  // container env so in-container processes can drive LiteLLM directly.
+  const llmEnvProvider: LlmEnvProvider | undefined = llmReady
+    ? async (userId: number) => {
+        const svc = createLlmService(db, litellmClient!, llmEncryptionKey!, {
+          publicBaseUrl: cfg.llm.litellm.publicBaseUrl,
+        });
+        const status = await svc.getMyStatus(userId);
+        if (!status.binding || status.binding.revoked_at) return undefined;
+        const keys = await svc.listMyKeys(userId);
+        const active = keys.find((k) => !k.revoked_at);
+        if (!active) return undefined;
+        const revealed = await svc.revealMyKey(active.id, userId);
+        const base = cfg.llm.litellm.publicBaseUrl.replace(/\/+$/, "");
+        return {
+          SANDBOX_LLM_BASE_URL: base.endsWith("/v1") ? base : `${base}/v1`,
+          SANDBOX_LLM_API_KEY: revealed.plaintext,
+        };
+      }
+    : undefined;
 
   const app = express();
   app.use(express.json({ limit: "16mb" }));
@@ -98,6 +121,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     req.app.locals.llmReady = llmReady;
     req.app.locals.llmEncryptionKey = llmEncryptionKey;
     req.app.locals.llmPublicBaseUrl = cfg.llm.litellm.publicBaseUrl;
+    req.app.locals.llmEnvProvider = llmEnvProvider;
     next();
   });
 
@@ -278,6 +302,11 @@ export function getLlmService(req: Request) {
   if (!key) throw new HttpError(500, "internal_error", "LLM encryption key not attached to request");
   const publicBaseUrl = (req.app.locals.llmPublicBaseUrl as string | undefined) ?? "http://localhost:4000";
   return createLlmService(db, client, key, { publicBaseUrl });
+}
+
+/** Read the optional LLM env-injection provider from request locals (undefined when LLM is off). */
+export function getLlmEnvProvider(req: Request): LlmEnvProvider | undefined {
+  return req.app.locals.llmEnvProvider as LlmEnvProvider | undefined;
 }
 
 export type { HttpError };

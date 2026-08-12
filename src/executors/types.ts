@@ -33,6 +33,13 @@ export interface ContainerHandle {
   running: boolean;
   /** Base image SIF path (needed to rebuild `instance start` from a handle). */
   imagePath?: string;
+  /**
+   * Environment overrides captured at create time, so the MockExecutor (which
+   * runs a local process per exec) can re-apply them on each command without a
+   * separate store. SSH/CLI executors inject env into the apptainer instance at
+   * start and do not read this field.
+   */
+  env?: Record<string, string>;
 }
 
 export interface SnapshotHandle {
@@ -107,7 +114,13 @@ export interface SandboxExecutor {
   /** Create + start an instance with a fresh overlay. */
   create(req: CreateRequest): Promise<ContainerHandle>;
   /** Start a stopped instance (re-attach overlay). */
-  start(handle: ContainerHandle): Promise<void>;
+  /**
+   * Start an existing (stopped) container. Optionally pass `env` to (re)apply
+   * environment overrides stored out-of-band (e.g. in containers.env); when
+   * omitted, executors that persist env on the handle reuse it. Implementations
+   * that create instances (rather than resuming a live one) MUST honor env.
+   */
+  start(handle: ContainerHandle, env?: Record<string, string>): Promise<void>;
   /** Stop a running instance gracefully (overlay retained). */
   stop(handle: ContainerHandle): Promise<void>;
   /** Destroy the instance AND its overlay (irreversible). */

@@ -99,7 +99,7 @@ export class SshExecutor implements SandboxExecutor {
       bindOpt = `--bind ${shellQuote(remoteSeed)}:/workspace`;
     }
 
-    await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb, bindOpt);
+    await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb, bindOpt, req.env);
     return { id: req.id, node: host, overlayPath, running: true, imagePath: req.imagePath };
   }
 
@@ -137,24 +137,27 @@ export class SshExecutor implements SandboxExecutor {
     cpu?: number,
     memoryMb?: number,
     extraOpts = "",
+    env?: Record<string, string>,
   ): Promise<void> {
     // Resource limits need cgroup support; only apply when enabled (default
     // OFF: rootless + cgroup-v1 hosts fail instance start with "rootless
     // cgroups requires cgroups v2").
     const cpuOpt = this.resourceLimits && cpu ? `--cpus ${cpu}` : "";
     const memOpt = this.resourceLimits && memoryMb ? `--memory ${memoryMb}M` : "";
+    const envOpt = envOpts(env);
     await this.execRemote(
-      `apptainer instance start --contain --no-mount hostfs,cwd ${cpuOpt} ${memOpt} --overlay ${shellQuote(overlayPath)} ${extraOpts} ${shellQuote(imagePath)} ${shellQuote(id)}`,
+      `apptainer instance start --contain --no-mount hostfs,cwd ${cpuOpt} ${memOpt} ${envOpt} --overlay ${shellQuote(overlayPath)} ${extraOpts} ${shellQuote(imagePath)} ${shellQuote(id)}`,
     );
   }
 
-  async start(handle: ContainerHandle): Promise<void> {
+  async start(handle: ContainerHandle, env?: Record<string, string>): Promise<void> {
     await this.connect(handle.node);
     // The handle carries the image path so a resume rebuilds a valid start
     // command; fall back to the overlay path as the image for legacy handles.
     const imageArg = handle.imagePath ? shellQuote(handle.imagePath) : shellQuote(handle.overlayPath);
+    const envOpt = envOpts(env ?? handle.env);
     await this.execRemote(
-      `apptainer instance start --contain --no-mount hostfs,cwd --overlay ${shellQuote(handle.overlayPath)} ${imageArg} ${shellQuote(handle.id)}`,
+      `apptainer instance start --contain --no-mount hostfs,cwd ${envOpt} --overlay ${shellQuote(handle.overlayPath)} ${imageArg} ${shellQuote(handle.id)}`,
     );
     handle.running = true;
   }
@@ -276,4 +279,19 @@ export class SshExecutor implements SandboxExecutor {
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Render `--env KEY=VALUE` flags for apptainer instance start. The KEY is
+ * constrained to a conservative charset (letters/digits/_/.) and VALUE is
+ * shell-quoted so injection via a value is not possible. Returns "" when empty.
+ */
+function envOpts(env?: Record<string, string>): string {
+  if (!env) return "";
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(k)) continue; // skip malformed names
+    parts.push(`--env ${k}=${shellQuote(String(v))}`);
+  }
+  return parts.join(" ");
 }

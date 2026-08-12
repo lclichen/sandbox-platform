@@ -54,15 +54,24 @@ export interface ContainerPublic extends Omit<ContainerRow, "instance_name" | "o
 
 /**
  * Public projection of a container row. `error_message` may embed internal
- * paths/runtime detail, so it is only exposed to admins (P2-1).
+ * paths/runtime detail, so it is only exposed to admins (P2-1). Env values that
+ * look like secrets (key/token/secret substrings) are masked so injected LLM
+ * virtual keys are never echoed back through GET /containers.
  */
+const SECRET_ENV_RE = /(_KEY|_TOKEN|_SECRET|PASSWORD|CREDENTIAL)$/i;
 function toPublic(row: ContainerRow, dialect: string, isAdmin = false): ContainerPublic {
   const { env: _env, error_message: _errorMessage, ...rest } = row;
   void _env;
   void _errorMessage;
+  const rawEnv = decodeJson<Record<string, string>>(row.env ?? null, dialect as never) ?? null;
+  const env = rawEnv
+    ? Object.fromEntries(
+        Object.entries(rawEnv).map(([k, v]) => [k, SECRET_ENV_RE.test(k) ? "***" : v]),
+      )
+    : null;
   return {
     ...rest,
-    env: decodeJson<Record<string, string>>(row.env ?? null, dialect as never) ?? null,
+    env,
     error_message: isAdmin ? row.error_message : null,
   };
 }
@@ -77,7 +86,16 @@ export interface CreateContainerInput {
   workspaceId?: number;
 }
 
-export function createContainerService(db: Database, executor: SandboxExecutor) {
+/**
+ * Optional hook that returns env overrides to inject into a newly created
+ * container for a given user (e.g. LLM base URL + virtual key when the user
+ * has an active LLM binding). When omitted or it returns undefined, no extra
+ * env is injected. Kept as a callback so this service stays decoupled from the
+ * LLM service + LiteLLM client.
+ */
+export type LlmEnvProvider = (userId: number) => Promise<Record<string, string> | undefined>;
+
+export function createContainerService(db: Database, executor: SandboxExecutor, llmEnvFor?: LlmEnvProvider) {
   const quotas = createQuotaService(db);
   const images = createImageService(db);
   const workspaces = createWorkspaceService(db);
@@ -131,6 +149,22 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
       // Enforce quota before any provisioning.
       await quotas.assertCanCreate(userId, request);
 
+      // Inject platform-managed env (LLM base URL + virtual key) when the owner
+      // has an active binding. The LLM env wins over user-supplied same-name
+      // keys so a user cannot bypass the platform's budgeted virtual key. A
+      // failure here is non-fatal: we proceed without LLM env rather than
+      // blocking container creation.
+      let llmEnv: Record<string, string> | undefined;
+      if (llmEnvFor) {
+        try {
+          llmEnv = await llmEnvFor(userId);
+        } catch (err) {
+          logger.warn({ userId, err: (err as Error).message }, "container.service: LLM env injection skipped");
+        }
+      }
+      const mergedEnv: Record<string, string> | undefined =
+        input.env || llmEnv ? { ...(input.env ?? {}), ...(llmEnv ?? {}) } : undefined;
+
       const instanceName = `sb-${nanoid(12)}`;
       const result = await db.run(
         `INSERT INTO containers
@@ -143,7 +177,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
         request.cpu,
         request.memory_mb,
         request.disk_gb,
-        encodeJson(input.env ?? null, db.dialect) as SqlValue,
+        encodeJson(mergedEnv ?? null, db.dialect) as SqlValue,
       );
       const containerId = Number(result.lastInsertRowid);
 
@@ -163,7 +197,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
           cpu: request.cpu,
           memoryMb: request.memory_mb,
           diskGb: request.disk_gb,
-          env: input.env,
+          env: mergedEnv,
           seedFromPath,
         });
         // Record overlay path + node, then mark running.
@@ -222,6 +256,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor) 
         cpu: row.cpu,
         memoryMb: row.memory_mb,
         diskGb: row.disk_gb,
+        env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
       });
       await db.run(
         "UPDATE containers SET status = 'running', overlay_path = ?, node = ?, last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, error_message = NULL WHERE id = ?",
