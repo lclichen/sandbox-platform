@@ -172,6 +172,70 @@ describe("syncWorkspaceToContainer", () => {
     });
     expect(result.files).toBe(2); // generated/out.js skipped
   });
+
+  it("incremental: skips unchanged files on the second run", async () => {
+    let writeCount = 0;
+    const client: SyncClient = {
+      toolWrite: async () => {
+        writeCount += 1;
+      },
+    };
+    // First run: full upload of both files.
+    const r1 = await syncWorkspaceToContainer(client, 7, dir);
+    expect(r1.files).toBe(2);
+    expect(r1.unchanged).toBe(0);
+    expect(writeCount).toBe(2);
+
+    // Second run: nothing changed -> all unchanged, zero uploads.
+    writeCount = 0;
+    const r2 = await syncWorkspaceToContainer(client, 7, dir);
+    expect(r2.files).toBe(0);
+    expect(r2.unchanged).toBe(2);
+    expect(writeCount).toBe(0);
+  });
+
+  it("incremental: re-uploads a file whose mtime/size changed", async () => {
+    let writeCount = 0;
+    const client: SyncClient = { toolWrite: async () => { writeCount += 1; } };
+    await syncWorkspaceToContainer(client, 7, dir);
+    expect(writeCount).toBe(2);
+
+    // Mutate one file (new content -> new size + mtime).
+    writeCount = 0;
+    await new Promise((r) => setTimeout(r, 20)); // ensure mtime advances
+    await writeFile(join(dir, "src", "main.ts"), "export const x = 2; // changed");
+    const r2 = await syncWorkspaceToContainer(client, 7, dir);
+    expect(r2.files).toBe(1); // only main.ts re-uploaded
+    expect(r2.unchanged).toBe(1); // README.md still matches
+    expect(writeCount).toBe(1);
+  });
+
+  it("incremental: switching containerId forces a full re-sync", async () => {
+    let writeCount = 0;
+    const client: SyncClient = { toolWrite: async () => { writeCount += 1; } };
+    await syncWorkspaceToContainer(client, 7, dir);
+    expect(writeCount).toBe(2);
+
+    // Same project, different container -> manifest keyed by containerId mismatches.
+    writeCount = 0;
+    const r2 = await syncWorkspaceToContainer(client, 99, dir);
+    expect(r2.files).toBe(2);
+    expect(r2.unchanged).toBe(0);
+    expect(writeCount).toBe(2);
+  });
+
+  it("incremental: opt out with incremental:false always uploads all", async () => {
+    let writeCount = 0;
+    const client: SyncClient = { toolWrite: async () => { writeCount += 1; } };
+    await syncWorkspaceToContainer(client, 7, dir);
+    expect(writeCount).toBe(2);
+
+    writeCount = 0;
+    const r2 = await syncWorkspaceToContainer(client, 7, dir, { incremental: false });
+    expect(r2.files).toBe(2);
+    expect(r2.unchanged).toBe(0);
+    expect(writeCount).toBe(2);
+  });
 });
 
 describe("withContainerCwd (user_bash ! prefix)", () => {
