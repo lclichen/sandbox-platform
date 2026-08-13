@@ -97,8 +97,10 @@ export async function request<T>(path: string, opts: { method?: string; body?: u
 }
 
 /** Serialize query params, dropping undefined/empty values so an empty
- *  search box (or optional filter) never emits e.g. `search=undefined`. */
-function qs(params: Record<string, string | number | undefined>): string {
+ *  search box (or optional filter) never emits e.g. `search=undefined`.
+ *  Exported for testing — this guards against the classic URLSearchParams
+ *  "undefined"-as-a-string regression. */
+export function qs(params: Record<string, string | number | undefined>): string {
   return new URLSearchParams(
     Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== "")) as Record<string, string>,
   ).toString();

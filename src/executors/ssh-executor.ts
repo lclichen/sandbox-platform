@@ -31,6 +31,7 @@ import type {
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
+import { isValidEnvName } from "./shell-quote.ts";
 
 export class SshExecutor implements SandboxExecutor {
   readonly kind: ExecutorKind = "ssh";
@@ -286,11 +287,11 @@ function shellQuote(s: string): string {
  * constrained to a conservative charset (letters/digits/_/.) and VALUE is
  * shell-quoted so injection via a value is not possible. Returns "" when empty.
  */
-function envOpts(env?: Record<string, string>): string {
+export function envOpts(env?: Record<string, string>): string {
   if (!env) return "";
   const parts: string[] = [];
   for (const [k, v] of Object.entries(env)) {
-    if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(k)) continue; // skip malformed names
+    if (!isValidEnvName(k)) continue; // skip malformed names
     parts.push(`--env ${k}=${shellQuote(String(v))}`);
   }
   return parts.join(" ");

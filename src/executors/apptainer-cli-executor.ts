@@ -21,6 +21,7 @@ import type {
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
+import { isValidEnvName } from "./shell-quote.ts";
 
 export class ApptainerCliExecutor implements SandboxExecutor {
   readonly kind: ExecutorKind = "apptainer-cli";
@@ -265,11 +266,11 @@ function shellQuote(s: string): string {
  * constrained to a conservative charset and VALUE is shell-quoted so a value
  * cannot inject into the argv. Returns [] when empty.
  */
-function envArgs(env?: Record<string, string>): string[] {
+export function envArgs(env?: Record<string, string>): string[] {
   if (!env) return [];
   const out: string[] = [];
   for (const [k, v] of Object.entries(env)) {
-    if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(k)) continue;
+    if (!isValidEnvName(k)) continue;
     out.push("--env", `${k}=${shellQuote(String(v))}`);
   }
   return out;
