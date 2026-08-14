@@ -215,4 +215,30 @@ describe("llm service", () => {
     const models = await svc.listModels();
     expect(models.map((m) => m.id)).toEqual(["gpt-4o", "claude-sonnet"]);
   });
+
+  it("binding.models is decoded to a real array (sqlite stores JSON as text)", async () => {
+    // grant with a models list, then read it back through listBindings / getMyStatus;
+    // the JSON column must be decoded, not returned as a string (regression: the
+    // admin/user pages called models.join() and crashed on sqlite).
+    await svc.grantAccess({
+      platformUserId: userId,
+      maxBudget: 5,
+      models: ["gpt-4o", "claude-sonnet"],
+      grantedBy: adminId,
+    });
+
+    const bindings = await svc.listBindings();
+    const binding = bindings.find((b) => b.platform_user_id === userId);
+    expect(Array.isArray(binding!.models)).toBe(true);
+    expect(binding!.models).toEqual(["gpt-4o", "claude-sonnet"]);
+
+    const status = await svc.getMyStatus(userId);
+    expect(Array.isArray(status.binding?.models)).toBe(true);
+    expect(status.binding?.models).toEqual(["gpt-4o", "claude-sonnet"]);
+
+    // And listMyKeys returns models as an array too.
+    const keys = await svc.listMyKeys(userId);
+    expect(keys.length).toBeGreaterThan(0);
+    expect(Array.isArray(keys[0].models)).toBe(true);
+  });
 });
