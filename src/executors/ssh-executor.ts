@@ -101,6 +101,15 @@ export class SshExecutor implements SandboxExecutor {
     }
 
     await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb, bindOpt, req.env);
+    // --contain drops default binds; ensure /workspace exists (bash cwd target).
+    // Idempotent; skipped when a seed is bind-mounted (bind already provides it).
+    if (!req.seedFromPath) {
+      try {
+        await this.execRemote(`apptainer exec instance://${shellQuote(req.id)} mkdir -p /workspace`);
+      } catch {
+        // best-effort
+      }
+    }
     return { id: req.id, node: host, overlayPath, running: true, imagePath: req.imagePath };
   }
 

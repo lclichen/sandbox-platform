@@ -91,7 +91,22 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       req.imagePath,
       req.id,
     ]);
+    // --contain drops all default bind mounts, so the image starts with only
+    // its baked-in directories. The extension runs every bash command with
+    // cwd=/workspace; ensure it exists inside the container (mkdir -p is
+    // idempotent and works on both ext3 and directory overlays).
+    await this.ensureWorkspaceDir(req.id);
     return { id: req.id, node: "local", overlayPath, running: true, imagePath: req.imagePath, env: req.env };
+  }
+
+  /** Ensure /workspace exists inside a running instance (bash cwd target). */
+  private async ensureWorkspaceDir(id: string): Promise<void> {
+    try {
+      await this.runCli(["exec", `instance://${id}`, "mkdir", "-p", "/workspace"]);
+    } catch {
+      // Best-effort: the container still starts; a missing /workspace surfaces
+      // as a cd error in bash rather than a create failure.
+    }
   }
 
   /** Create a sparse ext3 overlay sized to diskGb (MiB); fall back to a dir. */
@@ -124,6 +139,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     else args.push(handle.overlayPath);
     args.push(handle.id);
     await this.runCli(args);
+    await this.ensureWorkspaceDir(handle.id);
     handle.running = true;
   }
 
@@ -170,6 +186,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       req.imagePath,
       req.id,
     ]);
+    await this.ensureWorkspaceDir(req.id);
     return { id: req.id, node: "local", overlayPath, running: true, imagePath: req.imagePath };
   }
 
