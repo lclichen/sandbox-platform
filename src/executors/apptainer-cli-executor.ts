@@ -23,6 +23,15 @@ import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
 import { isValidEnvName } from "./shell-quote.ts";
 
+/**
+ * Host-isolation flags for `apptainer instance start`, mirroring the SSH
+ * executor. `--contain` drops the default bind mounts (home, /tmp, ...);
+ * `--no-mount hostfs,cwd` prevents the host filesystem and the platform's
+ * working directory from leaking into the container. Without these, `pwd`
+ * inside the container returns the host path and the guest can read host files.
+ */
+const ISOLATION_FLAGS = ["--contain", "--no-mount", "hostfs,cwd"];
+
 export class ApptainerCliExecutor implements SandboxExecutor {
   readonly kind: ExecutorKind = "apptainer-cli";
   private readonly bin: string;
@@ -70,6 +79,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     }
     await this.runCli([
       "instance", "start",
+      ...ISOLATION_FLAGS,
       // Resource limits need cgroup support; only apply when enabled (default
       // OFF: rootless + cgroup-v1 hosts fail with "rootless cgroups requires
       // cgroups v2").
@@ -92,6 +102,10 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     } catch {
       // missing — create below
     }
+    // apptainer overlay create writes a .ext3 file via dd but does NOT create
+    // the parent directory; ensure it exists first or dd fails with
+    // "No such file or directory" and we silently fall back to an unbounded dir.
+    await mkdir(dirname(overlayPath), { recursive: true });
     if (diskGb > 0) {
       const sizeMiB = Math.max(1, Math.round(diskGb * 1024));
       const created = await this.runCli(["overlay", "create", "--size", String(sizeMiB), overlayPath]);
@@ -105,7 +119,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   }
 
   async start(handle: ContainerHandle, env?: Record<string, string>): Promise<void> {
-    const args = ["instance", "start", ...envArgs(env ?? handle.env), "--overlay", handle.overlayPath];
+    const args = ["instance", "start", ...ISOLATION_FLAGS, ...envArgs(env ?? handle.env), "--overlay", handle.overlayPath];
     if (handle.imagePath) args.push(handle.imagePath);
     else args.push(handle.overlayPath);
     args.push(handle.id);
@@ -149,6 +163,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await cp(snapshot.overlayPath, overlayPath, { recursive: true });
     await this.runCli([
       "instance", "start",
+      ...ISOLATION_FLAGS,
       ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       "--overlay", overlayPath,
@@ -191,7 +206,11 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   }
 
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {
-    const args = ["exec", `instance://${handle.id}`, "sh", "-c", command];
+    // Prefix with `cd <cwd> &&` so commands run inside the container workspace,
+    // not in the inherited host cwd (which leaks in without --contain). Mirrors
+    // the SSH executor's cwd handling.
+    const cwdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
+    const args = ["exec", `instance://${handle.id}`, "sh", "-c", cwdPrefix + command];
     return this.runCli(args, opts);
   }
 
