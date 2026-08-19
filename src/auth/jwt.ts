@@ -15,6 +15,8 @@ export interface AccessClaims {
   username: string;
   role: "admin" | "user";
   type: "access";
+  /** R9: set while the account owes a password change; gates most endpoints. */
+  pwd_change_required?: boolean;
 }
 
 export interface RefreshClaims {
@@ -25,8 +27,19 @@ export interface RefreshClaims {
 
 const config = loadConfig();
 
-export function signAccessToken(user: { id: number; username: string; role: "admin" | "user" }): string {
-  const claims: AccessClaims = { sub: user.id, username: user.username, role: user.role, type: "access" };
+export function signAccessToken(user: {
+  id: number;
+  username: string;
+  role: "admin" | "user";
+  mustChangePassword?: boolean;
+}): string {
+  const claims: AccessClaims = {
+    sub: user.id,
+    username: user.username,
+    role: user.role,
+    type: "access",
+    ...(user.mustChangePassword ? { pwd_change_required: true } : {}),
+  };
   return jwt.sign(claims, config.auth.jwtSecret, { expiresIn: config.auth.accessTtl });
 }
 

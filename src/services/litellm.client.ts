@@ -22,7 +22,7 @@ import { logger } from "../utils/logger.ts";
 /** LiteLLM returned 429 — TPM/RPM or concurrency limit hit. */
 export class RateLimitError extends HttpError {
   constructor(message: string, details?: unknown) {
-    super(429, "rate_limited", message, details);
+    super(429, "RATE_LIMITED", message, details);
   }
 }
 
@@ -151,7 +151,7 @@ export function createLitellmClient(opts: LitellmClientOptions) {
         lastErr = err;
         // Only retry on network-level unreachable errors (never on mapped
         // business errors from LiteLLM — those mean the request landed).
-        const isUnreachable = err instanceof HttpError && err.code === "llm_unreachable";
+        const isUnreachable = err instanceof HttpError && err.code === "LLM_UNREACHABLE";
         if (!retryable || !isUnreachable || attempt === attempts - 1) throw err;
         await sleep(backoffMs[attempt] ?? 800);
       }
@@ -185,9 +185,9 @@ export function createLitellmClient(opts: LitellmClientOptions) {
     } catch (err) {
       clearTimeout(timer);
       if (err instanceof Error && err.name === "AbortError") {
-        throw new HttpError(503, "llm_timeout", `LiteLLM request timed out after ${timeoutMs}ms.`);
+        throw new HttpError(503, "LLM_TIMEOUT", `LiteLLM request timed out after ${timeoutMs}ms.`);
       }
-      throw new HttpError(503, "llm_unreachable", `Cannot reach LiteLLM at ${base}: ${err instanceof Error ? err.message : String(err)}`);
+      throw new HttpError(503, "LLM_UNREACHABLE", `Cannot reach LiteLLM at ${base}: ${err instanceof Error ? err.message : String(err)}`);
     }
     clearTimeout(timer);
 
@@ -252,7 +252,7 @@ export function createLitellmClient(opts: LitellmClientOptions) {
     async generateKey(input: GenerateKeyInput): Promise<GeneratedKey> {
       const data = await request<GeneratedKey & { _is_none?: boolean }>("/key/generate", { body: input });
       if (!data || typeof data !== "object" || typeof (data as GeneratedKey).key !== "string") {
-        throw new HttpError(502, "llm_bad_response", "LiteLLM /key/generate did not return a key string.", data);
+        throw new HttpError(502, "LLM_BAD_RESPONSE", "LiteLLM /key/generate did not return a key string.", data);
       }
       return data;
     },
@@ -368,7 +368,7 @@ function mapLitellmError(status: number, body: unknown, path: string): HttpError
   if (status >= 400 && status < 500) {
     return new BadRequestError(`LiteLLM rejected request at ${path}: ${asStr || status}`, detail);
   }
-  return new HttpError(502, "llm_error", `LiteLLM returned ${status} at ${path}: ${asStr || "upstream error"}`, detail);
+  return new HttpError(502, "LLM_ERROR", `LiteLLM returned ${status} at ${path}: ${asStr || "upstream error"}`, detail);
 }
 
 /** Whether LLM integration is wired up given the current config. */

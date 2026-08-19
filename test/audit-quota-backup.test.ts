@@ -73,7 +73,7 @@ describe("aggregate disk quota (P2-5)", () => {
       .set("Authorization", `Bearer ${token}`)
       .send(Buffer.from("hello"));
     expect(upload.status).toBe(422);
-    expect(upload.body.code).toBe("quota_exceeded");
+    expect(upload.body.code).toBe("QUOTA_EXCEEDED");
     expect(upload.body.message).toContain("Aggregate disk quota");
   });
 
@@ -99,7 +99,7 @@ describe("aggregate disk quota (P2-5)", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ name: "v1" });
     expect(snap.status).toBe(422);
-    expect(snap.body.code).toBe("quota_exceeded");
+    expect(snap.body.code).toBe("QUOTA_EXCEEDED");
   });
 });
 

@@ -96,9 +96,9 @@ describe("litellm client", () => {
     await expect(client().generateKey({ user_id: "u1" })).rejects.toBeInstanceOf(HttpError);
   });
 
-  it("translates network failure to llm_unreachable(503)", async () => {
+  it("translates network failure to LLM_UNREACHABLE(503)", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof globalThis.fetch;
-    await expect(client().generateKey({ user_id: "u1" })).rejects.toMatchObject({ status: 503, code: "llm_unreachable" });
+    await expect(client().generateKey({ user_id: "u1" })).rejects.toMatchObject({ status: 503, code: "LLM_UNREACHABLE" });
   });
 
   it("/key/delete uses POST (not DELETE)", async () => {

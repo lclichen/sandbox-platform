@@ -9,7 +9,7 @@
  *   GET    /me/endpoint        base URL + usage instructions for direct LLM calls
  *   GET    /models             available LiteLLM models
  *
- * When LLM integration is disabled, every route returns 503 llm_not_enabled.
+ * When LLM integration is disabled, every route returns 501 LLM_NOT_ENABLED.
  */
 import { Router } from "express";
 import { getLlmService } from "../app.ts";

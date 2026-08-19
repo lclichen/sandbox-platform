@@ -33,11 +33,37 @@ backup and migration tooling).
 - **Web admin console** — a React SPA (`web/`) served by the platform at the
   same origin; see `web/README.md`. Covers dashboard, users, quotas, images,
   containers, workspaces, logs, and LLM management.
-- **LLM gateway integration (optional)** — when `LLM_ENABLED=true`, manages
-  LiteLLM proxy users/virtual-keys/budgets and exposes spend reporting. See
-  `litellm/README.md`.
+- **LLM gateway integration (optional component)** — LiteLLM is **not required**
+  and ships disabled (`LLM_ENABLED=false`). When off, every `/api/v1/*llm*`
+  route answers `501 LLM_NOT_ENABLED`, containers get no `SANDBOX_LLM_*` env,
+  and the pi extension silently skips provider registration. Enable only if you
+  deploy the proxy: see `litellm/README.md`.
 - **Backup & cross-database migration** — portable JSON archives; copy data
   between sqlite and postgresql in either direction.
+
+### pi-web integration capabilities
+
+Requirements and semantics are specified in `docs/PI-WEB-INTEGRATION-REQUIREMENTS.md`;
+full API contract (stable error-code table, SSE semantics, single-instance
+constraints) lives in `docs/API-REFERENCE.md`; deployment in
+`docs/DEPLOYMENT.md`.
+
+- **Self-registration (R1)** — `REGISTER_MODE=off|open|approval`; approval
+  queue + CSV batch import in the admin Users page.
+- **First-login password change (R9)** — admin-created/imported accounts can be
+  flagged `must_change_password`; gated via `403 PASSWORD_CHANGE_REQUIRED`.
+- **Interactive terminals (R2)** — `GET /api/v1/containers/:id/pty`
+  WebSocket bridging `apptainer exec instance://<id> bash`, with frame protocol,
+  per-container limits, idle reaping, and session accounting. MockExecutor
+  provides an echo terminal so the path is testable on win32.
+- **Workspace enhancements (R5)** — one-request recursive tree (`?depth=`
+  `&cursor=`), chunked resumable uploads, and move/rename.
+- **Container selection (R6)** — list filters (`filter=running&image=<id>`),
+  per-quota image whitelists (`allowed_image_ids`), and
+  `GET /api/v1/provision/defaults` for one-click sandbox provisioning.
+- **Stable error codes (R7)** — every error carries an UPPER_SNAKE `code`
+  (e.g. `QUOTA_EXCEEDED`, `CONTAINER_NOT_RUNNING`); see the full table in
+  `docs/API-REFERENCE.md`.
 
 ## Quick start (sqlite + Mock executor)
 
@@ -154,10 +180,16 @@ level; live pg verification is a deployment-time step.
 
 ## Notes & limitations (MVP)
 
+- **Single instance only.** Idempotency cache, PTY concurrency counters, rate
+  limiter, and chunked-upload sessions are process-local state — see
+  `docs/API-REFERENCE.md` §3 for the failure surface under multi-instance
+  deployments. Scale up vertically for now.
 - Single execution node; the executor abstraction leaves room for a scheduler.
 - Auth is built-in JWT (refresh rotation). Keycloak/LDAP/SCIM integration is
   out of scope but the auth layer is the integration point.
-- LLM integration is optional and off by default; enabling it requires a
-  separate LiteLLM proxy deployment (see `litellm/`).
+- LLM integration is an **optional component** and off by default (`LLM_ENABLED=false`
+  → all `/api/v1/*llm*` routes return `501`); enabling it requires a separate
+  LiteLLM proxy deployment (see `litellm/`).
 - The `bash` tool relay returns buffered output; a low-latency SSE stream
-  endpoint (`/tools/bash/stream`) exists for terminal-style clients.
+  endpoint (`/tools/bash/stream`) exists for terminal-style clients, and an
+  interactive PTY WebSocket (`/containers/:id/pty`) for real terminals (R2).

@@ -19,6 +19,7 @@
  * unavailable so the factory falls back.
  */
 import { NodeSSH } from "node-ssh";
+import type { ClientChannel } from "ssh2";
 import type {
   SandboxExecutor,
   ExecutorKind,
@@ -28,6 +29,8 @@ import type {
   FileStat,
   ExecOptions,
   ExecResult,
+  PtyOptions,
+  PtySession,
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
@@ -284,6 +287,59 @@ export class SshExecutor implements SandboxExecutor {
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  /**
+   * Interactive container terminal (R2): an SSH exec channel with a pty
+   * allocated, running `apptainer exec instance://<id> bash`. The shared SSH
+   * connection stays open — only the channel ends when the shell exits.
+   */
+  async openPty(handle: ContainerHandle, opts: PtyOptions): Promise<PtySession> {
+    await this.connect(handle.node);
+    const client = this.ssh.connection;
+    if (!client) throw new Error("SSH connection not established");
+    const command = `apptainer exec instance://${shellQuote(handle.id)} bash`;
+    const channel = await new Promise<ClientChannel>((resolve, reject) => {
+      client.exec(
+        command,
+        { pty: { term: "xterm", cols: opts.cols, rows: opts.rows } } as never,
+        (err: Error | undefined, stream: ClientChannel) => {
+          if (err) reject(err);
+          else resolve(stream);
+        },
+      );
+    });
+    let exited = false;
+    return {
+      write(data: string) {
+        channel.write(data);
+      },
+      resize(cols: number, rows: number) {
+        channel.setWindow(rows, cols, 480, 640);
+      },
+      kill() {
+        if (!exited) {
+          exited = true;
+          channel.close();
+        }
+      },
+      onData(cb) {
+        channel.stdout.on("data", (d: Buffer) => cb(d));
+        channel.stderr.on("data", (d: Buffer) => cb(d));
+      },
+      onExit(cb) {
+        channel.on("exit", (code: number | null) => {
+          exited = true;
+          cb(code);
+        });
+        channel.on("close", () => {
+          if (!exited) {
+            exited = true;
+            cb(null);
+          }
+        });
+      },
+    };
   }
 }
 

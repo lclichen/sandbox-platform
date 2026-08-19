@@ -20,6 +20,8 @@ import type {
   FileStat,
   ExecOptions,
   ExecResult,
+  PtyOptions,
+  PtySession,
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
@@ -318,6 +320,54 @@ export class MockExecutor implements SandboxExecutor {
       // ignore
     }
     return total;
+  }
+
+  /**
+   * Fake interactive terminal for tests / win32 development (R2). Echoes every
+   * input chunk back as output; the `exit` line ends the session with code 0.
+   * Resize is accepted but has no visual effect. This keeps the PTY WebSocket
+   * layer fully testable without a container runtime.
+   */
+  async openPty(_handle: ContainerHandle, opts: PtyOptions): Promise<PtySession> {
+    let dataCb: ((chunk: Buffer) => void) | undefined;
+    let exitCb: ((code: number | null) => void) | undefined;
+    let line = "";
+    let closed = false;
+    void opts;
+    return {
+      write(data: string) {
+        if (closed) return;
+        dataCb?.(Buffer.from(data));
+        for (const ch of data) {
+          if (ch === "\r" || ch === "\n") {
+            const cmd = line.trim();
+            line = "";
+            if (cmd === "exit") {
+              closed = true;
+              dataCb?.(Buffer.from("\r\n[pty exited]\r\n"));
+              exitCb?.(0);
+            }
+          } else {
+            line += ch;
+          }
+        }
+      },
+      resize(_cols: number, _rows: number) {
+        /* fake terminal: resize is a no-op */
+      },
+      kill() {
+        if (!closed) {
+          closed = true;
+          exitCb?.(1);
+        }
+      },
+      onData(cb) {
+        dataCb = cb;
+      },
+      onExit(cb) {
+        exitCb = cb;
+      },
+    };
   }
 }
 

@@ -14,6 +14,24 @@ export const refreshSchema = z.object({
   refreshToken: z.string().min(1),
 });
 
+// R1: self-registration. Password policy (length/complexity) is additionally
+// enforced server-side against env config in the register handler.
+export const registerSchema = z.object({
+  username: z
+    .string()
+    .min(2)
+    .max(64)
+    .regex(/^[a-zA-Z0-9_.-]+$/, "Letters, digits, _ . - only"),
+  password: z.string().min(1).max(256),
+  email: z.string().email().optional(),
+});
+
+// R9: self-service password change.
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(256),
+  newPassword: z.string().min(1).max(256),
+});
+
 // ----- users -----
 export const createUserSchema = z.object({
   username: z.string().min(2).max(64).regex(/^[a-zA-Z0-9_.-]+$/, "Letters, digits, _ . - only"),
@@ -21,13 +39,15 @@ export const createUserSchema = z.object({
   email: z.string().email().optional(),
   role: z.enum(["admin", "user"]).optional(),
   quota_id: z.number().int().positive().optional(),
+  /** R9: force a password change on first login (admin-created accounts). */
+  mustChangePassword: z.boolean().optional(),
 });
 
 export const updateUserSchema = z.object({
   email: z.string().email().optional(),
   role: z.enum(["admin", "user"]).optional(),
   quota_id: z.number().int().positive().nullable().optional(),
-  status: z.enum(["active", "disabled"]).optional(),
+  status: z.enum(["active", "disabled", "pending"]).optional(),
 });
 
 export const setPasswordSchema = z.object({
@@ -47,6 +67,11 @@ export const paginationSchema = z.object({
     .transform((v) => (v && v !== "undefined" ? v : undefined)),
 });
 
+// R1: admin user listing may filter by status (approval queue).
+export const listUsersSchema = paginationSchema.extend({
+  status: z.enum(["active", "disabled", "pending"]).optional(),
+});
+
 // ----- quotas -----
 export const createQuotaSchema = z.object({
   name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/, "Letters, digits, _ - only"),
@@ -57,6 +82,8 @@ export const createQuotaSchema = z.object({
   max_disk_gb: z.number().int().min(0),
   max_snapshots_per_container: z.number().int().min(0),
   max_workspaces_per_user: z.number().int().min(0).max(10000).optional(),
+  /** R6: image-id whitelist; null/empty = all public images. */
+  allowed_image_ids: z.array(z.number().int().positive()).nullable().optional(),
 });
 
 export const updateQuotaSchema = createQuotaSchema.partial();
@@ -98,6 +125,10 @@ export const createContainerSchema = z.object({
 
 export const listContainersSchema = paginationSchema.extend({
   status: z.string().optional(),
+  /** R6: running|stopped|all — friendly alias for status, pi-web-facing. */
+  filter: z.enum(["running", "stopped", "all"]).optional(),
+  /** R6: only containers created from this image id. */
+  image: z.coerce.number().int().positive().optional(),
 });
 
 export const createSnapshotSchema = z.object({
@@ -174,6 +205,23 @@ export const workspaceDirSchema = z.object({
     .min(1)
     .max(1024)
     .regex(/^[^\u0000<>:"|?*]+$/, "Path contains forbidden characters"),
+});
+
+// R5: move/rename. `to` is either a new full path, or a target directory when
+// it ends with "/" (mv semantics).
+export const moveFileSchema = z.object({
+  path: z
+    .string()
+    .min(1)
+    .max(1024)
+    .regex(/^[^\u0000<>:"|?*]+$/, "Path contains forbidden characters"),
+  to: z.string().min(1).max(1024),
+});
+
+// R5: chunked upload session start.
+export const initUploadSchema = z.object({
+  name: z.string().min(1).max(255),
+  size: z.number().int().min(0).optional(),
 });
 
 // ----- LLM integration -----

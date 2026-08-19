@@ -39,7 +39,7 @@ export function imagesRouter(): Router {
       .getById(id)
       .then((image) => {
         if (!image) {
-          res.status(404).json({ code: "not_found", message: `Image ${id} not found` });
+          res.status(404).json({ code: "NOT_FOUND", message: `Image ${id} not found` });
           return;
         }
         res.json(image);

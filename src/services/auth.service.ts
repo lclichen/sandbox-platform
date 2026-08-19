@@ -6,7 +6,7 @@
  * refresh token.
  */
 import type { Database } from "../db/driver.ts";
-import { verifyPassword } from "../auth/password.ts";
+import { verifyPassword, validatePasswordPolicy } from "../auth/password.ts";
 import {
   signAccessToken,
   signRefreshToken,
@@ -17,7 +17,7 @@ import {
   type RefreshClaims,
 } from "../auth/jwt.ts";
 import { createUserService, type UserRow } from "./user.service.ts";
-import { UnauthorizedError, ForbiddenError } from "../utils/errors.ts";
+import { UnauthorizedError, BadRequestError, AccountPendingError, HttpError } from "../utils/errors.ts";
 
 export interface TokenPair {
   accessToken: string;
@@ -61,7 +61,12 @@ export function createAuthService(db: Database) {
       family,
     );
     return {
-      accessToken: signAccessToken(user),
+      accessToken: signAccessToken({
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        mustChangePassword: Number(user.must_change_password) === 1 || user.must_change_password === true,
+      }),
       refreshToken,
       expiresIn: ACCESS_LIFETIMES[process.env.JWT_ACCESS_TTL ?? "15m"] ?? accessLifetimeSeconds(),
     };
@@ -71,7 +76,10 @@ export function createAuthService(db: Database) {
     async login(username: string, password: string, clientIp?: string): Promise<TokenPair & { user: UserRow }> {
       const user = await users.getByUsername(username);
       if (!user) throw new UnauthorizedError("Invalid username or password");
-      if (user.status === "disabled") throw new ForbiddenError("Account is disabled");
+      if (user.status === "pending") throw new AccountPendingError();
+      if (user.status === "disabled") {
+        throw new HttpError(403, "ACCOUNT_DISABLED", "Account is disabled");
+      }
       const ok = await verifyPassword(password, user.password_hash);
       if (!ok) throw new UnauthorizedError("Invalid username or password");
       await users.touchLogin(user.id);
@@ -106,7 +114,10 @@ export function createAuthService(db: Database) {
 
       const user = await users.getById(stored.user_id);
       if (!user) throw new UnauthorizedError("User no longer exists");
-      if (user.status === "disabled") throw new ForbiddenError("Account is disabled");
+      if (user.status === "pending") throw new AccountPendingError();
+      if (user.status === "disabled") {
+        throw new HttpError(403, "ACCOUNT_DISABLED", "Account is disabled");
+      }
 
       // Rotate: revoke old, issue new within the same family.
       await db.run("UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?", stored.id);
@@ -127,6 +138,29 @@ export function createAuthService(db: Database) {
       const user = await users.getById(userId);
       if (!user) throw new UnauthorizedError("User not found");
       return user;
+    },
+
+    /**
+     * R9: self-service password change. Verifies the current password, applies
+     * the configured policy, clears the must_change_password flag, and revokes
+     * every refresh token issued under the old credential (all sessions then
+     * re-authenticate with the new password).
+     */
+    async changePassword(userId: number, currentPassword: string, newPassword: string): Promise<void> {
+      const user = await users.getById(userId);
+      if (!user) throw new UnauthorizedError("User not found");
+      const ok = await verifyPassword(currentPassword, user.password_hash);
+      if (!ok) throw new UnauthorizedError("Current password is incorrect");
+      if (currentPassword === newPassword) {
+        throw new BadRequestError("New password must differ from the current one");
+      }
+      const violation = validatePasswordPolicy(newPassword);
+      if (violation) throw new BadRequestError(violation);
+      await users.setPassword(userId, newPassword, true);
+      await db.run(
+        "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
+        userId,
+      );
     },
   };
 }

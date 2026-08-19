@@ -15,6 +15,8 @@ import type { Database, SqlValue } from "../db/driver.ts";
 import { createQuotaService } from "./quota.service.ts";
 import { NotFoundError, ConflictError, BadRequestError } from "../utils/errors.ts";
 import { logger } from "../utils/logger.ts";
+import { loadConfig } from "../config.ts";
+import { nanoid } from "nanoid";
 import * as storage from "./workspace-storage.ts";
 import type { WorkspaceFileEntry } from "./workspace-storage.ts";
 
@@ -289,6 +291,131 @@ export function createWorkspaceService(db: Database) {
     /** Resolve the host directory path for a workspace (used by container.service to seed). */
     hostDir(ws: WorkspaceRow): string {
       return storage.workspaceDir(ws.user_id, ws.id);
+    },
+
+    // ---- R5: recursive tree, move, chunked uploads ----
+
+    /** One-request recursive tree (depth-capped, ignore-listed, cursor-paged). */
+    async tree(
+      id: number,
+      userId: number,
+      rel: string,
+      opts: { depth?: number; cursor?: string } = {},
+      isAdmin = false,
+    ): Promise<{ root: string; entries: storage.TreeEntry[]; truncated: boolean; nextCursor?: string }> {
+      const ws = await this.requireOwned(id, userId, isAdmin);
+      const cfg = loadConfig();
+      const depth = Math.min(Math.max(opts.depth ?? 8, 1), 32);
+      const result = await storage.walkTree(ws.user_id, id, rel, {
+        ignore: cfg.workspace.treeIgnore,
+        maxDepth: depth,
+        maxEntries: 5000,
+        ...(opts.cursor ? { afterPath: opts.cursor } : {}),
+      });
+      return { root: rel === "/" ? "" : rel.replace(/^\/+|\/+$/g, ""), ...result };
+    },
+
+    /** Move/rename a file or directory (mv semantics for `to`). */
+    async moveFile(
+      id: number,
+      userId: number,
+      fromRel: string,
+      toRel: string,
+      isAdmin = false,
+    ): Promise<{ path: string }> {
+      const ws = await this.requireOwned(id, userId, isAdmin);
+      const result = await storage.move(ws.user_id, id, fromRel, toRel);
+      void refreshStats(id, ws.user_id).catch(() => {});
+      return result;
+    },
+
+    /** Start a chunked upload session; sweeps stale sessions opportunistically. */
+    async startUpload(
+      id: number,
+      userId: number,
+      input: { name: string; dirRel: string; size?: number },
+      isAdmin = false,
+    ): Promise<{ uploadId: string; partBytesMax: number; maxBytes: number }> {
+      const ws = await this.requireOwned(id, userId, isAdmin);
+      if (!input.name || input.name.includes("/") || input.name.includes("\\") || input.name.includes("\0")) {
+        throw new BadRequestError("Invalid filename");
+      }
+      const cfg = loadConfig();
+      if (input.size !== undefined && input.size > cfg.workspace.uploadMaxBytes) {
+        throw new BadRequestError(
+          `File exceeds the per-file limit of ${cfg.workspace.uploadMaxBytes} bytes`,
+        );
+      }
+      void storage.sweepStaleUploads(cfg.workspace.uploadTtlHours).catch(() => {});
+      const uploadId = nanoid(16);
+      await storage.createUpload({
+        uploadId,
+        userId: ws.user_id,
+        wsId: id,
+        name: input.name,
+        dirRel: input.dirRel.replace(/\/+$/, ""),
+        ...(input.size !== undefined ? { size: input.size } : {}),
+      });
+      // Part cap 8 MiB keeps a single request body bounded; sessions may span
+      // as many parts as needed up to the total cap enforced at completion.
+      return { uploadId, partBytesMax: 8 * 1024 * 1024, maxBytes: cfg.workspace.uploadMaxBytes };
+    },
+
+    /** Append one part to a session. The session must belong to this user. */
+    async uploadPart(
+      id: number,
+      userId: number,
+      uploadId: string,
+      part: number,
+      content: Buffer,
+      isAdmin = false,
+    ): Promise<{ part: number; received: number }> {
+      const ws = await this.requireOwned(id, userId, isAdmin);
+      const meta = await storage.readUpload(uploadId);
+      if (!meta || meta.wsId !== id || meta.userId !== ws.user_id) {
+        throw new NotFoundError("Upload session", uploadId);
+      }
+      const received = await storage.writeUploadPart(uploadId, part, content);
+      return { part, received };
+    },
+
+    /** Concatenate parts, enforce size + disk quota, write the final file. */
+    async completeUpload(
+      id: number,
+      userId: number,
+      uploadId: string,
+      isAdmin = false,
+    ): Promise<{ path: string; size: number }> {
+      const ws = await this.requireOwned(id, userId, isAdmin);
+      const meta = await storage.readUpload(uploadId);
+      if (!meta || meta.wsId !== id || meta.userId !== ws.user_id) {
+        throw new NotFoundError("Upload session", uploadId);
+      }
+      const cfg = loadConfig();
+      const parts = await storage.collectUploadParts(uploadId);
+      const total = parts.reduce((sum, p) => sum + p.byteLength, 0);
+      if (total > cfg.workspace.uploadMaxBytes) {
+        await storage.removeUpload(uploadId).catch(() => {});
+        throw new BadRequestError(
+          `Upload exceeds the per-file limit of ${cfg.workspace.uploadMaxBytes} bytes`,
+        );
+      }
+      const rel = meta.dirRel ? `${meta.dirRel}/${meta.name}` : meta.name;
+      await quotas.assertAggregateDisk(ws.user_id, total);
+      await storage.writeFile(ws.user_id, id, rel, Buffer.concat(parts));
+      await storage.removeUpload(uploadId).catch(() => {});
+      await refreshStats(id, ws.user_id);
+      return { path: rel, size: total };
+    },
+
+    /** Abort a session and discard its parts. */
+    async abortUpload(id: number, userId: number, uploadId: string, isAdmin = false): Promise<void> {
+      const ws = await this.requireOwned(id, userId, isAdmin);
+      const meta = await storage.readUpload(uploadId);
+      if (!meta || meta.wsId !== id || meta.userId !== ws.user_id) {
+        throw new NotFoundError("Upload session", uploadId);
+      }
+      await storage.removeUpload(uploadId);
     },
   };
 }

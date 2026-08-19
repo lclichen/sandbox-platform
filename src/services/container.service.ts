@@ -19,6 +19,7 @@ import {
   ForbiddenError,
   InvalidStateError,
   BadRequestError,
+  ContainerNotRunningError,
 } from "../utils/errors.ts";
 import { logger } from "../utils/logger.ts";
 
@@ -115,8 +116,12 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       return row;
     },
 
-    /** List containers for a user (admins can pass userId=undefined to list all). */
-    async list(userId: number | undefined, opts: { limit?: number; offset?: number; status?: string } = {}): Promise<ContainerRow[]> {
+    /** List containers for a user (admins can pass userId=undefined to list all).
+     *  R6: `image` filters by image id; `filter` is a friendly status alias. */
+    async list(
+      userId: number | undefined,
+      opts: { limit?: number; offset?: number; status?: string; image?: number } = {},
+    ): Promise<ContainerRow[]> {
       const limit = Math.min(opts.limit ?? 50, 200);
       const offset = opts.offset ?? 0;
       const where: string[] = [];
@@ -129,6 +134,10 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         where.push("status = ?");
         params.push(opts.status);
       }
+      if (opts.image) {
+        where.push("image_id = ?");
+        params.push(opts.image);
+      }
       const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
       return db.all<ContainerRow>(
         `SELECT * FROM containers ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
@@ -140,6 +149,12 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
 
     async create(userId: number, input: CreateContainerInput): Promise<ContainerRow> {
       const image = await images.requireById(input.imageId);
+      // R6: the owner's quota may whitelist which images are provisionable.
+      await quotas.assertImageAllowed(userId, {
+        id: image.id,
+        is_public: Boolean(image.is_public),
+        name: image.name,
+      });
       const defaults = image.default_resources ?? { cpu: 1, memoryMb: 1024, diskGb: 5 };
       const request: ResourceRequest = {
         cpu: input.cpu ?? defaults.cpu,
@@ -444,7 +459,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
     /** Resolve the current handle for the tools routes (must be running). */
     async resolveRunningHandle(id: number, userId: number, isAdmin = false): Promise<{ row: ContainerRow; handle: ContainerHandle }> {
       const row = await this.requireOwned(id, userId, isAdmin);
-      if (row.status !== "running") throw new InvalidStateError("Container is not running");
+      if (row.status !== "running") throw new ContainerNotRunningError();
       return { row, handle: handleFromRow(row) };
     },
 

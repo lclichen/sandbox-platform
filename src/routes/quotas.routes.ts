@@ -39,7 +39,7 @@ export function quotasRouter(): Router {
       .getById(id)
       .then((quota) => {
         if (!quota) {
-          res.status(404).json({ code: "not_found", message: `Quota ${id} not found` });
+          res.status(404).json({ code: "NOT_FOUND", message: `Quota ${id} not found` });
           return;
         }
         res.json(quota);

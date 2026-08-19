@@ -8,6 +8,7 @@ import { closeDatabase } from "./db/driver.ts";
 import { runMigrations } from "./db/migrate.ts";
 import { getExecutor } from "./executors/index.ts";
 import { createReaper } from "./scheduler/reaper.ts";
+import { attachPtyServer } from "./routes/pty.ts";
 import { logger } from "./utils/logger.ts";
 import { loadConfig, assertSecureProductionConfig } from "./config.ts";
 
@@ -49,6 +50,10 @@ async function main() {
   const server = app.listen(config.port, config.host, () => {
     logger.info({ host: config.host, port: config.port }, "Server listening.");
   });
+
+  // R2: interactive container terminals ride the same HTTP server
+  // (/api/v1/containers/:id/pty WebSocket upgrades).
+  attachPtyServer(server, { db, executor: await getExecutor() });
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Shutting down...");

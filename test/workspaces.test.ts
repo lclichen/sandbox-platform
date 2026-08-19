@@ -235,7 +235,7 @@ describe("workspaces", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ name: "over-limit" });
     expect(res.status).toBe(422);
-    expect(res.body.code).toBe("quota_exceeded");
+    expect(res.body.code).toBe("QUOTA_EXCEEDED");
   });
 
   it("seeds /workspace into a container created with workspaceId", async () => {

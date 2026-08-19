@@ -6,7 +6,8 @@
  * admin-managed.
  */
 import type { Database, SqlValue } from "../db/driver.ts";
-import { ConflictError, NotFoundError, QuotaExceededError } from "../utils/errors.ts";
+import { encodeJson, decodeJson } from "../db/driver.ts";
+import { ConflictError, NotFoundError, QuotaExceededError, ImageNotAllowedError } from "../utils/errors.ts";
 import { createUserService } from "./user.service.ts";
 
 export interface QuotaRow {
@@ -19,6 +20,8 @@ export interface QuotaRow {
   max_disk_gb: number;
   max_snapshots_per_container: number;
   max_workspaces_per_user: number;
+  /** R6: image-id whitelist; null/empty = all public images allowed. */
+  allowed_image_ids: number[] | null;
   created_at: string;
   updated_at: string;
 }
@@ -33,19 +36,36 @@ export interface ResourceRequest {
  *  and an optional description (normalized to null by create()). */
 export type QuotaCreateInput = Omit<
   QuotaRow,
-  "id" | "created_at" | "updated_at" | "max_workspaces_per_user" | "description"
-> & { description?: string | null; max_workspaces_per_user?: number };
+  "id" | "created_at" | "updated_at" | "max_workspaces_per_user" | "description" | "allowed_image_ids"
+> & {
+  description?: string | null;
+  max_workspaces_per_user?: number;
+  allowed_image_ids?: number[] | null;
+};
+
+/** Decode a raw quota row: normalize allowed_image_ids JSON → number[] | null. */
+function decodeRow(row: Record<string, unknown>, dialect: string): QuotaRow {
+  const ids = decodeJson<unknown>(row.allowed_image_ids ?? null, dialect as never);
+  return {
+    ...(row as unknown as QuotaRow),
+    allowed_image_ids: Array.isArray(ids)
+      ? ids.map(Number).filter((n) => Number.isFinite(n))
+      : null,
+  };
+}
 
 export function createQuotaService(db: Database) {
   const users = createUserService(db);
 
   return {
     async getById(id: number): Promise<QuotaRow | null> {
-      return db.get<QuotaRow>("SELECT * FROM resource_quotas WHERE id = ?", id);
+      const row = await db.get<Record<string, unknown>>("SELECT * FROM resource_quotas WHERE id = ?", id);
+      return row ? decodeRow(row, db.dialect) : null;
     },
 
     async getByName(name: string): Promise<QuotaRow | null> {
-      return db.get<QuotaRow>("SELECT * FROM resource_quotas WHERE name = ?", name);
+      const row = await db.get<Record<string, unknown>>("SELECT * FROM resource_quotas WHERE name = ?", name);
+      return row ? decodeRow(row, db.dialect) : null;
     },
 
     async requireById(id: number): Promise<QuotaRow> {
@@ -55,7 +75,8 @@ export function createQuotaService(db: Database) {
     },
 
     async list(): Promise<QuotaRow[]> {
-      return db.all<QuotaRow>("SELECT * FROM resource_quotas ORDER BY id");
+      const rows = await db.all<Record<string, unknown>>("SELECT * FROM resource_quotas ORDER BY id");
+      return rows.map((r) => decodeRow(r, db.dialect));
     },
 
     async create(input: QuotaCreateInput): Promise<QuotaRow> {
@@ -63,8 +84,8 @@ export function createQuotaService(db: Database) {
       if (existing) throw new ConflictError(`Quota '${input.name}' already exists`);
       const result = await db.run(
         `INSERT INTO resource_quotas
-          (name, description, max_containers, max_cpu_cores, max_memory_mb, max_disk_gb, max_snapshots_per_container, max_workspaces_per_user)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          (name, description, max_containers, max_cpu_cores, max_memory_mb, max_disk_gb, max_snapshots_per_container, max_workspaces_per_user, allowed_image_ids)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         input.name,
         input.description ?? null,
         input.max_containers,
@@ -73,6 +94,7 @@ export function createQuotaService(db: Database) {
         input.max_disk_gb,
         input.max_snapshots_per_container,
         input.max_workspaces_per_user ?? 10,
+        encodeJson(input.allowed_image_ids ?? null, db.dialect) as SqlValue,
       );
       return (await this.getById(Number(result.lastInsertRowid)))!;
     },
@@ -84,7 +106,7 @@ export function createQuotaService(db: Database) {
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
         sets.push(`${key} = ?`);
-        values.push(value as SqlValue);
+        values.push(key === "allowed_image_ids" ? (encodeJson(value ?? null, db.dialect) as SqlValue) : (value as SqlValue));
       }
       if (sets.length === 0) return current;
       values.push(id);
@@ -140,6 +162,27 @@ export function createQuotaService(db: Database) {
         throw new QuotaExceededError(`Disk ${request.disk_gb}GB exceeds quota ${quota.max_disk_gb}GB`, { limit: quota.max_disk_gb });
       }
       return quota;
+    },
+
+    /**
+     * R6: enforce the quota's image whitelist. A public image is allowed when
+     * the whitelist is null/empty; otherwise the image id must be listed.
+     * Non-public images are never allowed via this path (admin-only concern).
+     */
+    async assertImageAllowed(userId: number, image: { id: number; is_public: boolean; name?: string }): Promise<void> {
+      const quota = await this.forUser(userId);
+      if (!image.is_public) {
+        // Non-public images are reserved for admins (checked by the caller).
+        return;
+      }
+      const whitelist = quota.allowed_image_ids;
+      if (!whitelist || whitelist.length === 0) return;
+      if (!whitelist.includes(image.id)) {
+        throw new ImageNotAllowedError(
+          `Image ${image.name ?? image.id} is not in the allowed image list for quota '${quota.name}'`,
+          { imageId: image.id, quota: quota.name },
+        );
+      }
     },
 
     /**

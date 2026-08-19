@@ -153,7 +153,7 @@ describe("container lifecycle", () => {
       .set("Authorization", `Bearer ${userToken}`)
       .send({ imageId, name: "too-big", memoryMb: 4096 });
     expect(over.status).toBe(422);
-    expect(over.body.code).toBe("quota_exceeded");
+    expect(over.body.code).toBe("QUOTA_EXCEEDED");
   });
 
   it("snapshots, mutates, restores the pre-mutation state", async () => {

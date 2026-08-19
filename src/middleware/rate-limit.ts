@@ -28,7 +28,7 @@ function limiter(windowMs: number, max: number): RequestHandler {
     max,
     standardHeaders: true, // RateLimit-* headers per the IETF draft
     legacyHeaders: false,
-    message: { code: "rate_limited", message: "Too many requests, please try again later" },
+    message: { code: "RATE_LIMITED", message: "Too many requests, please try again later" },
   });
 }
 
@@ -54,4 +54,14 @@ export function bashLimiter(): RequestHandler {
 export function llmRevealLimiter(): RequestHandler {
   const c = loadConfig();
   return c.rateLimit.enabled ? limiter(60_000, c.rateLimit.llmRevealPerMinute) : noop();
+}
+
+/**
+ * R1: self-registration abuse guard. Tighter than login — a public write
+ * endpoint that mints accounts must not be hammerable. The captcha hook is
+ * deliberately left as a future extension point (see requirements doc R9).
+ */
+export function registerLimiter(): RequestHandler {
+  const c = loadConfig();
+  return c.rateLimit.enabled ? limiter(60_000, c.rateLimit.registerPerMinute) : noop();
 }

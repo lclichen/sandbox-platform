@@ -18,6 +18,8 @@ import type {
   FileStat,
   ExecOptions,
   ExecResult,
+  PtyOptions,
+  PtySession,
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
@@ -229,6 +231,47 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     const cwdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
     const args = ["exec", `instance://${handle.id}`, "sh", "-c", cwdPrefix + command];
     return this.runCli(args, opts);
+  }
+
+  /**
+   * Interactive container terminal (R2): spawn `apptainer exec instance://<id>
+   * bash` with pipes. Not a real TTY (spawn cannot allocate one without
+   * node-pty), so interactive programs that require a pty degrade — plain
+   * shell I/O works. Resize is accepted as a no-op.
+   */
+  async openPty(handle: ContainerHandle, opts: PtyOptions): Promise<PtySession> {
+    const child = spawn(this.bin, ["exec", `instance://${handle.id}`, "bash"], {
+      windowsHide: true,
+    });
+    void opts;
+    let exited = false;
+    return {
+      write(data: string) {
+        if (!child.stdin.destroyed) child.stdin.write(data);
+      },
+      resize(_cols: number, _rows: number) {
+        /* pipes cannot be resized; no-op */
+      },
+      kill() {
+        if (!exited) child.kill("SIGKILL");
+      },
+      onData(cb) {
+        child.stdout.on("data", (d: Buffer) => cb(d));
+        child.stderr.on("data", (d: Buffer) => cb(d));
+      },
+      onExit(cb) {
+        child.on("close", (code) => {
+          exited = true;
+          cb(code);
+        });
+        child.on("error", () => {
+          if (!exited) {
+            exited = true;
+            cb(null);
+          }
+        });
+      },
+    };
   }
 
   /** Size of a snapshot dir in bytes, measured on the HOST (du -sb). */

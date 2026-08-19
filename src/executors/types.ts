@@ -107,6 +107,28 @@ export interface ExecStream {
   kill(): void;
 }
 
+// ---- interactive PTY (R2: container terminal WebSocket) ----
+
+export interface PtyOptions {
+  cols: number;
+  rows: number;
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+/**
+ * A live interactive shell inside the container. Callbacks are set once via
+ * onData/onExit before any write; kill() tears the process down. The platform
+ * bridges this onto the /containers/:id/pty WebSocket.
+ */
+export interface PtySession {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
+  onData(cb: (chunk: Buffer) => void): void;
+  onExit(cb: (code: number | null) => void): void;
+}
+
 export interface SandboxExecutor {
   readonly kind: ExecutorKind;
   /** Probe whether the executor can operate (binary present, ssh reachable, ...). */
@@ -137,6 +159,11 @@ export interface SandboxExecutor {
   readdir(handle: ContainerHandle, path: string): Promise<string[]>;
   stat(handle: ContainerHandle, path: string): Promise<FileStat>;
   exec(handle: ContainerHandle, command: string, opts?: ExecOptions): Promise<ExecResult>;
+
+  // ---- interactive terminal (R2). Optional so an executor can decline
+  // (callers must treat "absent" as "terminal unsupported"); MockExecutor
+  // provides an echo shell so the WS layer is testable on win32. ----
+  openPty?(handle: ContainerHandle, opts: PtyOptions): Promise<PtySession>;
 }
 
 /**

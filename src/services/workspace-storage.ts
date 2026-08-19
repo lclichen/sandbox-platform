@@ -220,5 +220,245 @@ export async function statWorkspace(
   return { sizeBytes, fileCount };
 }
 
+// ---- R5: recursive tree, move/rename, chunked uploads ----
+
+export interface TreeEntry extends WorkspaceFileEntry {
+  /** Depth relative to the tree root (root's direct children = 0). */
+  depth: number;
+}
+
+export interface TreeOptions {
+  /** Directory names skipped entirely (node_modules, .git, ...). */
+  ignore: string[];
+  /** Maximum recursion depth (root's children = 0). */
+  maxDepth: number;
+  /** Stop and mark truncated after this many entries. */
+  maxEntries: number;
+  /** Continuation cursor from a previous response (last entry path). */
+  afterPath?: string;
+}
+
+export interface TreeResult {
+  entries: TreeEntry[];
+  truncated: boolean;
+  nextCursor?: string;
+}
+
+/**
+ * Walk the workspace (or a subdirectory) depth-first and return a flat,
+ * path-sorted entry list with depth annotations. Deterministic order (path
+ * ascending) makes the `afterPath` cursor stable across pages. The ignore
+ * list only applies to directories; hidden files are kept.
+ */
+export async function walkTree(
+  userId: number,
+  wsId: number,
+  rel: string,
+  opts: TreeOptions,
+): Promise<TreeResult> {
+  const rootDir = resolveInWorkspace(userId, wsId, rel);
+  const root = workspaceDir(userId, wsId);
+  const entries: TreeEntry[] = [];
+  let truncated = false;
+
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (truncated) return;
+    let dirents;
+    try {
+      dirents = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable or vanished — skip
+    }
+    // Sort by name for a stable, cursor-friendly order.
+    dirents.sort((a, b) => a.name.localeCompare(b.name));
+    for (const dirent of dirents) {
+      if (truncated) return;
+      if (dirent.isDirectory() && opts.ignore.includes(dirent.name)) continue;
+      const full = join(dir, dirent.name);
+      const hostRel = full.slice(root.length).split(sep).join("/").replace(/^\/+/, "");
+      let s;
+      try {
+        s = await stat(full);
+      } catch {
+        continue;
+      }
+      const entry: TreeEntry = {
+        name: dirent.name,
+        path: hostRel,
+        isDir: dirent.isDirectory(),
+        size: s.isDirectory() ? 0 : s.size,
+        mtime: s.mtime.toISOString(),
+        depth,
+      };
+      // Cursor continuation: skip emitting entries at/before the cursor, but
+      // STILL descend into directories — their subtree may contain later paths
+      // ("docs" <= cursor "docs", yet "docs/a.md" > cursor).
+      const beforeCursor = !!opts.afterPath && hostRel <= opts.afterPath!;
+      if (!beforeCursor) {
+        if (entries.length >= opts.maxEntries) {
+          truncated = true;
+          return;
+        }
+        entries.push(entry);
+      }
+      if (dirent.isDirectory() && depth < opts.maxDepth) {
+        await walk(full, depth + 1);
+      }
+    }
+  };
+
+  await walk(rootDir, 0);
+  return {
+    entries,
+    truncated,
+    ...(truncated && entries.length > 0 ? { nextCursor: entries[entries.length - 1].path } : {}),
+  };
+}
+
+/**
+ * Move/rename a file or directory within the workspace (R5). `to` semantics
+ * mirror `mv`: a trailing slash means "target directory, keep the name";
+ * otherwise `to` is the new full path. Containment is enforced on both ends,
+ * and a move onto the workspace root or into itself is rejected.
+ */
+export async function move(
+  userId: number,
+  wsId: number,
+  fromRel: string,
+  toRel: string,
+): Promise<{ path: string }> {
+  const from = resolveInWorkspace(userId, wsId, fromRel);
+  const root = workspaceDir(userId, wsId);
+  if (from === root) throw new BadRequestError("Refusing to move the workspace root");
+  try {
+    await fsAccess(from);
+  } catch {
+    throw new NotFoundError("Workspace path", fromRel);
+  }
+  const name = from.split(sep).pop()!;
+  // Trailing slash (or ".") → target directory; keep the entry's name.
+  const asDir = /\/$/.test(toRel) || toRel === "." || toRel === "./";
+  const targetRel = asDir ? `${toRel.replace(/\/+$/, "")}/${name}` : toRel;
+  const to = resolveInWorkspace(userId, wsId, targetRel);
+  if (to === root || to === from) {
+    throw new BadRequestError("Invalid move target");
+  }
+  // Moving a directory into its own subtree would orphan it.
+  if (to.startsWith(from + sep)) {
+    throw new BadRequestError("Cannot move a directory into itself");
+  }
+  const hostToRel = to.slice(root.length).split(sep).join("/").replace(/^\/+/, "");
+  await mkdir(dirname(to), { recursive: true });
+  await rename(from, to);
+  return { path: hostToRel };
+}
+
+// ---- chunked uploads (R5) ----
+
+/** Root directory holding in-flight chunked uploads (per platform instance). */
+function uploadsRoot(): string {
+  return join(base(), ".uploads");
+}
+
+export interface UploadMeta {
+  uploadId: string;
+  userId: number;
+  wsId: number;
+  name: string;
+  dirRel: string;
+  /** Declared total size (optional; enforcement uses actual bytes). */
+  size?: number;
+  createdAt: number;
+}
+
+async function uploadDir(uploadId: string): Promise<string> {
+  const dir = join(uploadsRoot(), uploadId);
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+/** Create an upload session and return its id (meta is kept next to the parts). */
+export async function createUpload(
+  meta: Omit<UploadMeta, "createdAt">,
+): Promise<UploadMeta & { createdAt: number }> {
+  const withTime = { ...meta, createdAt: Date.now() };
+  const dir = await uploadDir(meta.uploadId);
+  await fsWriteFile(join(dir, "meta.json"), JSON.stringify(withTime), "utf8");
+  return withTime;
+}
+
+/** Read back an upload session's meta; null when unknown or swept. */
+export async function readUpload(uploadId: string): Promise<UploadMeta | null> {
+  if (!/^[A-Za-z0-9_-]{6,64}$/.test(uploadId)) return null;
+  try {
+    const raw = await fsReadFile(join(uploadsRoot(), uploadId, "meta.json"), "utf8");
+    return JSON.parse(raw) as UploadMeta;
+  } catch {
+    return null;
+  }
+}
+
+/** Store one numbered part (raw bytes). Parts are opaque until completion. */
+export async function writeUploadPart(
+  uploadId: string,
+  part: number,
+  content: Buffer,
+): Promise<number> {
+  if (!Number.isInteger(part) || part < 1 || part > 100_000) {
+    throw new BadRequestError("Part number must be an integer in [1, 100000]");
+  }
+  const meta = await readUpload(uploadId);
+  if (!meta) throw new NotFoundError("Upload session", uploadId);
+  const dir = await uploadDir(uploadId);
+  await fsWriteFile(join(dir, `part-${String(part).padStart(6, "0")}`), content);
+  return content.byteLength;
+}
+
+/** Concatenate stored parts (in part-number order) into ordered buffers. */
+export async function collectUploadParts(uploadId: string): Promise<Buffer[]> {
+  const dir = join(uploadsRoot(), uploadId);
+  let names: string[];
+  try {
+    names = (await readdir(dir)).filter((n) => n.startsWith("part-")).sort();
+  } catch {
+    throw new NotFoundError("Upload session", uploadId);
+  }
+  if (names.length === 0) throw new BadRequestError("Upload session has no parts");
+  const chunks: Buffer[] = [];
+  for (const n of names) chunks.push(await fsReadFile(join(dir, n)));
+  return chunks;
+}
+
+/** Remove the upload session directory (after completion or on abort). */
+export async function removeUpload(uploadId: string): Promise<void> {
+  await rm(join(uploadsRoot(), uploadId), { recursive: true, force: true });
+}
+
+/**
+ * Sweep upload sessions older than ttlHours. Called opportunistically when a
+ * new session starts so no background timer is needed (single-instance
+ * constraint is documented; see docs/API-REFERENCE.md).
+ */
+export async function sweepStaleUploads(ttlHours: number): Promise<void> {
+  const root = uploadsRoot();
+  let ids: string[];
+  try {
+    ids = await readdir(root);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - ttlHours * 3600_000;
+  for (const id of ids) {
+    try {
+      const dirStat = await stat(join(root, id));
+      if (dirStat.mtimeMs < cutoff) {
+        await rm(join(root, id), { recursive: true, force: true });
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
 // `posix` import is reserved for future cross-platform path serialization needs.
 void posixPath;

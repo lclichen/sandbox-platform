@@ -31,6 +31,12 @@ function bool(name: string, fallback: boolean): boolean {
 
 export type DbDialect = "sqlite" | "postgresql";
 export type ExecutorKind = "mock" | "ssh" | "apptainer-cli";
+export type RegisterMode = "off" | "open" | "approval";
+
+function asRegisterMode(value: string): RegisterMode {
+  if (value === "off" || value === "open" || value === "approval") return value;
+  throw new Error(`Unsupported REGISTER_MODE: ${value}. Use "off", "open", or "approval".`);
+}
 
 function asDialect(value: string): DbDialect {
   if (value === "postgresql" || value === "sqlite") return value;
@@ -64,12 +70,25 @@ export interface AppConfig {
     adminUsername: string;
     adminPassword: string;
   };
+  /** R1: self-registration switch + defaults. */
+  register: {
+    mode: RegisterMode;
+    /** resource_quotas.name assigned to self-registered accounts. */
+    defaultQuotaName: string;
+  };
+  /** R9: password policy applied to register/admin-create/password-change. */
+  passwordPolicy: {
+    minLength: number;
+    /** When true, require upper+lower+digit (special chars optional). */
+    requireComplexity: boolean;
+  };
   rateLimit: {
     enabled: boolean;
     loginPerMinute: number;
     refreshPerMinute: number;
     bashPerMinute: number;
     llmRevealPerMinute: number;
+    registerPerMinute: number;
   };
   executor: {
     kind: ExecutorKind;
@@ -98,6 +117,29 @@ export interface AppConfig {
     autoStopSnapshot: boolean;
     snapshotTier: string;
     auditRetentionDays: number;
+  };
+  /** R2: interactive PTY WebSocket limits. */
+  pty: {
+    /** Concurrent PTY sessions per container. */
+    maxPerContainer: number;
+    /** Kill PTY sessions with no client traffic for this many minutes. */
+    idleTimeoutMinutes: number;
+  };
+  /** R5: workspace file limits + chunked-upload retention. */
+  workspace: {
+    /** Hard cap for a single uploaded file (bytes). */
+    uploadMaxBytes: number;
+    /** Directory names skipped by the tree endpoint (comma-separated env). */
+    treeIgnore: string[];
+    /** Incomplete chunked uploads older than this are swept (hours). */
+    uploadTtlHours: number;
+  };
+  /** R6: one-click sandbox provisioning defaults for pi-web. */
+  provision: {
+    /** Default image id for "new user first session" provisioning (0 = unset). */
+    defaultImageId: number;
+    /** Template workspace id seeded into provisioned containers (0 = unset). */
+    defaultWorkspaceId: number;
   };
   llm: {
     /** Master switch. When false, all /api/v1/*llm* routes return 503. */
@@ -142,6 +184,14 @@ export function loadConfig(): AppConfig {
       adminUsername: required("SEED_ADMIN_USERNAME", "admin"),
       adminPassword: required("SEED_ADMIN_PASSWORD", "changeme123"),
     },
+    register: {
+      mode: asRegisterMode(required("REGISTER_MODE", "off")),
+      defaultQuotaName: required("REGISTER_DEFAULT_QUOTA_NAME", "default"),
+    },
+    passwordPolicy: {
+      minLength: int("PASSWORD_MIN_LENGTH", 8),
+      requireComplexity: bool("PASSWORD_REQUIRE_COMPLEXITY", false),
+    },
     // Brute-force / abuse protection is on by default in production.
     rateLimit: {
       enabled: bool("RATE_LIMIT_ENABLED", nodeEnv === "production"),
@@ -149,6 +199,7 @@ export function loadConfig(): AppConfig {
       refreshPerMinute: int("RATE_LIMIT_REFRESH_PER_MINUTE", 30),
       bashPerMinute: int("RATE_LIMIT_BASH_PER_MINUTE", 60),
       llmRevealPerMinute: int("RATE_LIMIT_LLM_REVEAL_PER_MINUTE", 5),
+      registerPerMinute: int("RATE_LIMIT_REGISTER_PER_MINUTE", 5),
     },
     executor: {
       kind: asExecutorKind(required("EXECUTOR_KIND", "mock")),
@@ -174,6 +225,22 @@ export function loadConfig(): AppConfig {
       autoStopSnapshot: bool("IDLE_AUTO_STOP_SNAPSHOT", true),
       snapshotTier: required("IDLE_AUTO_STOP_SNAPSHOT_TIER", "auto"),
       auditRetentionDays: int("AUDIT_RETENTION_DAYS", 90),
+    },
+    pty: {
+      maxPerContainer: int("PTY_MAX_PER_CONTAINER", 3),
+      idleTimeoutMinutes: int("PTY_IDLE_TIMEOUT_MINUTES", 30),
+    },
+    workspace: {
+      uploadMaxBytes: int("WORKSPACE_UPLOAD_MAX_BYTES", 200 * 1024 * 1024),
+      treeIgnore: required("WORKSPACE_TREE_IGNORE", "node_modules,.git,dist,build")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      uploadTtlHours: int("WORKSPACE_UPLOAD_TTL_HOURS", 24),
+    },
+    provision: {
+      defaultImageId: int("PROVISION_DEFAULT_IMAGE_ID", 0),
+      defaultWorkspaceId: int("PROVISION_DEFAULT_WORKSPACE_ID", 0),
     },
     llm: {
       enabled: bool("LLM_ENABLED", false),

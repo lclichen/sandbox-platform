@@ -91,6 +91,10 @@ export function containersRouter(): Router {
 
   router.get("/", (req, res, next) => {
     const query = validate(listContainersSchema, req.query);
+    // R6: `filter` is a friendly alias for status (running|stopped|all).
+    if (!query.status && query.filter && query.filter !== "all") {
+      query.status = query.filter;
+    }
     const a = actor(req);
     const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
@@ -164,7 +168,7 @@ export function containersRouter(): Router {
     const { id } = validate(idParamSchema, req.params);
     const sid = Number.parseInt(req.params.sid, 10);
     if (Number.isNaN(sid)) {
-      res.status(400).json({ code: "bad_request", message: "Invalid snapshot id" });
+      res.status(400).json({ code: "BAD_REQUEST", message: "Invalid snapshot id" });
       return;
     }
     const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
@@ -178,7 +182,7 @@ export function containersRouter(): Router {
     const { id } = validate(idParamSchema, req.params);
     const sid = Number.parseInt(req.params.sid, 10);
     if (Number.isNaN(sid)) {
-      res.status(400).json({ code: "bad_request", message: "Invalid snapshot id" });
+      res.status(400).json({ code: "BAD_REQUEST", message: "Invalid snapshot id" });
       return;
     }
     const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));

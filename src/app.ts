@@ -17,7 +17,7 @@ import { logger } from "./utils/logger.ts";
 import { loadConfig } from "./config.ts";
 import { createDatabase, type Database } from "./db/driver.ts";
 import { getExecutor, type SandboxExecutorRef } from "./executors/index.ts";
-import { loginLimiter, refreshLimiter, bashLimiter, llmRevealLimiter } from "./middleware/rate-limit.ts";
+import { loginLimiter, refreshLimiter, bashLimiter, llmRevealLimiter, registerLimiter } from "./middleware/rate-limit.ts";
 import { metricsMiddleware, metricsHandler, registry, recordLitellmHealth } from "./middleware/metrics.ts";
 import { authRouter } from "./routes/auth.routes.ts";
 import { usersRouter } from "./routes/users.routes.ts";
@@ -32,6 +32,7 @@ import { publicImagesRouter } from "./routes/images.public.routes.ts";
 import { publicLogsRouter } from "./routes/logs.public.routes.ts";
 import { llmAdminRouter } from "./routes/llm.admin.routes.ts";
 import { llmRouter } from "./routes/llm.routes.ts";
+import { provisionRouter } from "./routes/provision.routes.ts";
 import { createLitellmClient, isLitellmConfigured, type LitellmClient } from "./services/litellm.client.ts";
 import { createLlmService } from "./services/llm.service.ts";
 import { type LlmEnvProvider } from "./services/container.service.ts";
@@ -46,9 +47,11 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   const db = deps?.db ?? (await createDatabase());
   const executor = deps?.executor ?? (await getExecutor());
 
-  // LiteLLM integration is optional. Wire it only when the admin has enabled it
-  // AND supplied both the master key and a valid encryption key; otherwise the
-  // /api/v1/*llm* routes return 503 via the accessors below.
+  // LiteLLM integration is optional (R4: disabled by default and fully inert
+  // when off). Wire it only when the admin has enabled it AND supplied both the
+  // master key and a valid encryption key; otherwise the /api/v1/*llm* routes
+  // return 501 via the accessors below and no SANDBOX_LLM_* env is ever
+  // injected into containers.
   const cfg = loadConfig();
   let litellmClient: LitellmClient | undefined;
   let llmEncryptionKey: EncryptionKey | undefined;
@@ -159,7 +162,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     if (token) {
       const sent = req.headers.authorization;
       if (sent !== `Bearer ${token}`) {
-        res.status(401).json({ code: "unauthorized", message: "Metrics require a bearer token (METRICS_TOKEN)." });
+        res.status(401).json({ code: "UNAUTHORIZED", message: "Metrics require a bearer token (METRICS_TOKEN)." });
         return;
       }
     }
@@ -169,7 +172,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
       res.end(body);
     } catch (err) {
       logger.error({ err }, "metrics scrape failed");
-      res.status(500).json({ code: "internal_error", message: "Metrics unavailable" });
+      res.status(500).json({ code: "INTERNAL_ERROR", message: "Metrics unavailable" });
     }
   });
 
@@ -184,6 +187,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   // No-op middleware when disabled (default outside production).
   app.use("/api/v1/auth/login", loginLimiter());
   app.use("/api/v1/auth/refresh", refreshLimiter());
+  app.use("/api/v1/auth/register", registerLimiter());
   app.use("/api/v1/containers/:id/tools/bash", bashLimiter());
   // The reveal endpoint returns decrypted plaintext; cap it tightly.
   app.use("/api/v1/llm/me/keys/:id/reveal", llmRevealLimiter());
@@ -198,6 +202,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.use("/api/v1/workspaces", workspacesRouter());
   app.use("/api/v1/images", publicImagesRouter());
   app.use("/api/v1/logs", publicLogsRouter());
+  app.use("/api/v1/provision", provisionRouter());
   app.use("/api/v1/admin/llm", llmAdminRouter());
   app.use("/api/v1/llm", llmRouter());
   app.use("/api/v1/admin", adminRouter());
@@ -236,12 +241,12 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     // For non-API requests without a static build, hint at running the web build.
     if (!req.path.startsWith("/api/")) {
       res.status(404).json({
-        code: "not_found",
+        code: "NOT_FOUND",
         message: "Admin UI not built. Run `npm run build` in the web/ directory.",
       });
       return;
     }
-    res.status(404).json({ code: "not_found", message: "Resource not found" });
+    res.status(404).json({ code: "NOT_FOUND", message: "Resource not found" });
   });
 
   // Unified error handler: convert thrown errors to JSON.
@@ -266,27 +271,28 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
 /** Typed accessor for the database attached to a request. */
 export function getDb(req: Request): Database {
   const db = req.app.locals.db as Database | undefined;
-  if (!db) throw new HttpError(500, "internal_error", "Database not attached to request");
+  if (!db) throw new HttpError(500, "INTERNAL_ERROR", "Database not attached to request");
   return db;
 }
 
 /** Typed accessor for the executor attached to a request. */
 export function getExecutorFromReq(req: Request): SandboxExecutorRef {
   const exec = req.app.locals.executor as SandboxExecutorRef | undefined;
-  if (!exec) throw new HttpError(500, "internal_error", "Executor not attached to request");
+  if (!exec) throw new HttpError(500, "INTERNAL_ERROR", "Executor not attached to request");
   return exec;
 }
 
 /**
- * Typed accessor for the optional LiteLLM client. Throws 503 (llm_not_enabled)
+ * Typed accessor for the optional LiteLLM client. Throws 501 (LLM_NOT_ENABLED)
  * when integration is off, so LLM routes fail loudly and uniformly instead of
- * each one re-checking config.
+ * each one re-checking config. 501 (not 503) signals "feature not deployed" —
+ * clients skip it permanently instead of treating it as transient.
  */
 export function getLitellmClient(req: Request): LitellmClient {
   const ready = req.app.locals.llmReady as boolean | undefined;
   const client = req.app.locals.litellmClient as LitellmClient | undefined;
   if (!ready || !client) {
-    throw new HttpError(503, "llm_not_enabled", "LLM integration is not enabled. Set LLM_ENABLED=true and configure LITELLM_MASTER_KEY / LLM_ENCRYPTION_KEY.");
+    throw new HttpError(501, "LLM_NOT_ENABLED", "LLM integration is not enabled. Set LLM_ENABLED=true and configure LITELLM_MASTER_KEY / LLM_ENCRYPTION_KEY.");
   }
   return client;
 }
@@ -299,7 +305,7 @@ export function getLlmService(req: Request) {
   const db = getDb(req);
   const client = getLitellmClient(req);
   const key = req.app.locals.llmEncryptionKey as EncryptionKey | undefined;
-  if (!key) throw new HttpError(500, "internal_error", "LLM encryption key not attached to request");
+  if (!key) throw new HttpError(500, "INTERNAL_ERROR", "LLM encryption key not attached to request");
   const publicBaseUrl = (req.app.locals.llmPublicBaseUrl as string | undefined) ?? "http://localhost:4000";
   return createLlmService(db, client, key, { publicBaseUrl });
 }

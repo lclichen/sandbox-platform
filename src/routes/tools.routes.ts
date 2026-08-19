@@ -67,7 +67,7 @@ export function toolsRouter(): Router {
     const { id } = validate(idParamSchema, req.params);
     const path = String(req.query.path ?? "");
     if (!path) {
-      res.status(400).json({ code: "bad_request", message: "path is required" });
+      res.status(400).json({ code: "BAD_REQUEST", message: "path is required" });
       return;
     }
     createToolsService(getDb(req), getExecutorFromReq(req))
@@ -80,7 +80,7 @@ export function toolsRouter(): Router {
     const { id } = validate(idParamSchema, req.params);
     const path = String(req.query.path ?? "");
     if (!path) {
-      res.status(400).json({ code: "bad_request", message: "path is required" });
+      res.status(400).json({ code: "BAD_REQUEST", message: "path is required" });
       return;
     }
     createToolsService(getDb(req), getExecutorFromReq(req))
