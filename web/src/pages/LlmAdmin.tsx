@@ -23,8 +23,8 @@ export function LlmAdmin() {
       setBindings(res.bindings);
       setDisabled(false);
     } catch (err) {
-      // 503 llm_not_enabled is the expected state when LiteLLM is off.
-      if (err instanceof ApiError && err.status === 503) {
+      // 501 LLM_NOT_ENABLED is the expected state when LiteLLM is off.
+      if (err instanceof ApiError && err.status === 501) {
         setDisabled(true);
         setBindings([]);
       } else {

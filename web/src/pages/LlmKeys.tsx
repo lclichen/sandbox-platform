@@ -28,7 +28,7 @@ export function LlmKeys() {
       setEndpoint(e);
       setDisabled(false);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 503) {
+      if (err instanceof ApiError && err.status === 501) {
         setDisabled(true);
       } else {
         setError(err instanceof ApiError ? err.message : "Failed to load LLM data");

@@ -16,6 +16,15 @@ interface AuthUser {
   role: string;
 }
 
+/** Thrown when login succeeds but the account owes a first-login password
+ *  change (R9); the Login page collects the new password before continuing. */
+export class PasswordChangeRequiredError extends Error {
+  constructor() {
+    super("Password change required before using this account");
+    this.name = "PasswordChangeRequiredError";
+  }
+}
+
 interface AuthState {
   user: AuthUser | null;
   /** True until the initial session-restore /me check finishes. */
@@ -94,6 +103,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const loginWithPassword = useCallback(async (username: string, password: string) => {
     const res = await api.login(username, password);
+    if (res.user.must_change_password) {
+      // Tokens ARE valid (change-password is reachable), but do not enter the
+      // console until the new password is set (R9).
+      setAccessToken(res.accessToken);
+      setRefreshToken(res.refreshToken);
+      writeStored(res.accessToken, res.refreshToken);
+      throw new PasswordChangeRequiredError();
+    }
     setAccessToken(res.accessToken);
     setRefreshToken(res.refreshToken);
     writeStored(res.accessToken, res.refreshToken);

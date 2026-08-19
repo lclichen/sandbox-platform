@@ -110,11 +110,28 @@ export function qs(params: Record<string, string | number | undefined>): string 
 export const api = {
   // auth
   login: (username: string, password: string) =>
-    request<{ accessToken: string; refreshToken: string; user: { id: number; username: string; role: string } }>(
-      "/api/v1/auth/login",
-      { method: "POST", body: { username, password } },
-    ),
+    request<{
+      accessToken: string;
+      refreshToken: string;
+      user: { id: number; username: string; role: string; must_change_password?: boolean };
+    }>("/api/v1/auth/login", {
+      method: "POST",
+      body: { username, password },
+    }),
   me: () => request<{ user: { id: number; username: string; role: string } }>("/api/v1/auth/me"),
+  // R1: public capability discovery + self-registration (register mode gated).
+  authConfig: () => request<{ registerMode: "off" | "open" | "approval" }>("/api/v1/auth/config"),
+  register: (body: { username: string; password: string; email?: string }) =>
+    request<{ user: import("./types").UserPublic; message?: string }>("/api/v1/auth/register", {
+      method: "POST",
+      body,
+    }),
+  // R9: self-service password change (also clears a must-change flag).
+  changeMyPassword: (currentPassword: string, newPassword: string) =>
+    request<void>("/api/v1/auth/change-password", {
+      method: "POST",
+      body: { currentPassword, newPassword },
+    }),
   // API keys are self-service: each user manages only their own keys.
   listMyApiKeys: () =>
     request<{
@@ -143,17 +160,31 @@ export const api = {
     }>("/api/v1/auth/dashboard"),
 
   // users
-  listUsers: (params: { limit?: number; offset?: number; search?: string } = {}) =>
-    request<{ total: number; users: import("./types").UserPublic[] }>(
-      `/api/v1/admin/users?${qs(params)}`,
-    ),
-  createUser: (body: { username: string; password: string; email?: string; role?: string; quota_id?: number }) =>
-    request<import("./types").UserPublic>("/api/v1/admin/users", { method: "POST", body }),
+  listUsers: (
+    params: { limit?: number; offset?: number; search?: string; status?: string } = {},
+  ) => request<{ total: number; users: import("./types").UserPublic[] }>(`/api/v1/admin/users?${qs(params)}`),
+  createUser: (body: {
+    username: string;
+    password: string;
+    email?: string;
+    role?: string;
+    quota_id?: number;
+    mustChangePassword?: boolean;
+  }) => request<import("./types").UserPublic>("/api/v1/admin/users", { method: "POST", body }),
   updateUser: (id: number, body: Partial<{ email: string; role: string; quota_id: number | null; status: string }>) =>
     request<import("./types").UserPublic>(`/api/v1/admin/users/${id}`, { method: "PATCH", body }),
   setUserPassword: (id: number, password: string) =>
     request<void>(`/api/v1/admin/users/${id}/password`, { method: "POST", body: { password } }),
   deleteUser: (id: number) => request<void>(`/api/v1/admin/users/${id}`, { method: "DELETE" }),
+  // R1: approval queue + CSV batch import.
+  approveUser: (id: number) => request<import("./types").UserPublic>(`/api/v1/admin/users/${id}/approve`, { method: "POST" }),
+  rejectUser: (id: number) => request<void>(`/api/v1/admin/users/${id}/reject`, { method: "POST" }),
+  importUsers: (body: { csv: string; mustChangePassword?: boolean; quota_id?: number }) =>
+    request<{
+      created: number;
+      failed: number;
+      results: Array<{ username: string; ok: boolean; error?: string }>;
+    }>("/api/v1/admin/users/import", { method: "POST", body }),
 
   // quotas
   listQuotas: () => request<{ quotas: import("./types").QuotaRow[] }>("/api/v1/admin/quotas"),
@@ -179,9 +210,18 @@ export const api = {
     request<import("./types").ImageRow>(`/api/v1/admin/images/${id}`, { method: "PATCH", body }),
   deleteImage: (id: number) => request<void>(`/api/v1/admin/images/${id}`, { method: "DELETE" }),
 
-  // containers: owner-scoped list (current user's own)
-  listContainers: (params: { limit?: number; offset?: number; status?: string } = {}) =>
-    request<{ containers: import("./types").ContainerPublic[] }>(`/api/v1/containers?${qs(params)}`),
+  // containers: owner-scoped list (current user's own). R6 adds filter/image.
+  listContainers: (
+    params: { limit?: number; offset?: number; status?: string; filter?: string; image?: number } = {},
+  ) => request<{ containers: import("./types").ContainerPublic[] }>(`/api/v1/containers?${qs(params)}`),
+  // R6: one-click provisioning defaults (default image + seed workspace).
+  provisionDefaults: () =>
+    request<{
+      imageId: number | null;
+      imageName: string | null;
+      workspaceId: number | null;
+      workspaceName: string | null;
+    }>("/api/v1/provision/defaults"),
   // containers: admin global list (all users)
   listAllContainers: (params: { limit?: number; offset?: number; status?: string } = {}) =>
     request<{ containers: import("./types").ContainerPublic[] }>(`/api/v1/admin/containers?${qs(params)}`),
@@ -218,7 +258,7 @@ export const api = {
   }) => request<{ total: number; logs: import("./types").LogRow[] }>(`/api/v1/logs?${qs(params)}`),
 
   // LLM integration (LiteLLM proxy). Admin endpoints manage bindings; user
-  // endpoints are owner-scoped. When LLM is disabled these return 503
+  // endpoints are owner-scoped. When LLM is disabled these return 501
   // llm_not_enabled, which callers surface as a banner.
   listLlmBindings: () =>
     request<{ bindings: import("./types").LlmBinding[] }>("/api/v1/admin/llm/bindings"),
@@ -296,7 +336,7 @@ export const api = {
       const refreshed = await refreshTokens();
       if (!refreshed) {
         onAuthFailure?.();
-        throw new ApiError(401, "unauthorized", "Session expired");
+        throw new ApiError(401, "UNAUTHORIZED", "Session expired");
       }
       return (await fetch(
         `/api/v1/workspaces/${id}/files?${qs({ path, name: filename })}`,
@@ -322,7 +362,7 @@ export const api = {
       const refreshed = await refreshTokens();
       if (!refreshed) {
         onAuthFailure?.();
-        throw new ApiError(401, "unauthorized", "Session expired");
+        throw new ApiError(401, "UNAUTHORIZED", "Session expired");
       }
       const retry = await fetch(url, {
         headers: { ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
@@ -337,4 +377,32 @@ export const api = {
     request<void>(`/api/v1/workspaces/${id}/files?${qs({ path })}`, { method: "DELETE" }),
   makeWorkspaceDir: (id: number, path: string) =>
     request<{ path: string }>(`/api/v1/workspaces/${id}/dirs?${qs({ path })}`, { method: "POST" }),
+  // R5: recursive tree in one request (depth/ignore handled server-side).
+  workspaceTree: (id: number, params: { path?: string; depth?: number; cursor?: string } = {}) =>
+    request<{
+      root: string;
+      entries: Array<{ name: string; path: string; isDir: boolean; size: number; mtime: string }>;
+      truncated: boolean;
+      nextCursor?: string;
+    }>(`/api/v1/workspaces/${id}/tree?${qs(params)}`),
+  // R5: move/rename a file or directory within the workspace.
+  moveWorkspaceFile: (id: number, path: string, to: string) =>
+    request<{ path: string }>(`/api/v1/workspaces/${id}/files/move`, { method: "POST", body: { path, to } }),
+  // R5: chunked upload (init → parts → complete/abort) for large files.
+  initWorkspaceUpload: (id: number, body: { name: string; path?: string; size?: number }) =>
+    request<{ uploadId: string; partBytesMax: number; maxBytes: number }>(
+      `/api/v1/workspaces/${id}/uploads`,
+      { method: "POST", body },
+    ),
+  abortWorkspaceUpload: (id: number, uploadId: string) =>
+    request<void>(`/api/v1/workspaces/${id}/uploads/${encodeURIComponent(uploadId)}`, { method: "DELETE" }),
+  completeWorkspaceUpload: (
+    id: number,
+    uploadId: string,
+    body: { name?: string; path?: string; totalBytes?: number },
+  ) =>
+    request<{ path: string; size: number }>(
+      `/api/v1/workspaces/${id}/uploads/${encodeURIComponent(uploadId)}/complete`,
+      { method: "POST", body },
+    ),
 };

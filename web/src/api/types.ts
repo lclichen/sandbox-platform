@@ -11,7 +11,9 @@ export interface UserPublic {
   email: string | null;
   role: "admin" | "user";
   quota_id: number | null;
-  status: "active" | "disabled";
+  status: "active" | "disabled" | "pending";
+  /** R9: set while the account owes a first-login password change. */
+  must_change_password: boolean;
   created_at: string;
   last_login_at: string | null;
 }
@@ -26,6 +28,8 @@ export interface QuotaRow {
   max_disk_gb: number;
   max_snapshots_per_container: number;
   max_workspaces_per_user: number;
+  /** R6: image-id whitelist; null = all public images. */
+  allowed_image_ids: number[] | null;
   created_at: string;
   updated_at: string;
 }
