@@ -1,7 +1,12 @@
 # pi-web 集成需求（沙箱平台侧）
 
-> 状态：需求稿，待补充实现。关联：pi-web 仓库 `docs/multi-user-and-modes-design.md`。
+> 状态：**R1–R7、R9(P1 部分) 已实现**（2026-08，见下表）；R8 与 R9 的 TOTP/邮箱验证（P2）留待后续迭代。
+> 关联：pi-web 仓库 `docs/multi-user-and-modes-design.md`。
 > 背景：pi-web（Next.js Web UI）将作为平台的多用户前端门户：登录依托平台账号，沙箱模式会话的工具经 `pi-sandbox-extension` 打到用户容器。本文件列出平台侧需要补充/调整的需求；其余现状能力（JWT/API Key、owner 隔离、配额、审计、快照、workspaces）已满足 P0 需要。
+>
+> 实现落点速查：错误码表/SSE 语义/单实例约束 → `docs/API-REFERENCE.md`；部署 → `docs/DEPLOYMENT.md`；
+> 自注册/审批/CSV → `auth.routes.ts` + `users.routes.ts` + Web `Users.tsx`/`Login.tsx`；PTY → `routes/pty.ts` + 三执行器 `openPty`；
+> workspaces 增强 → `workspace-storage.ts`/`workspaces.routes.ts`；容器选择 → `containers.routes.ts` + `quota.service.ts` + `provision.routes.ts`。
 
 ## R1 用户自注册（P0.5）
 
@@ -103,9 +108,9 @@
 
 ## 优先级总览
 
-| 需求 | 阶段 | 备注 |
-|---|---|---|
-| R3 部署、R7 稳定性、R4 网关降级 | P0 前置 | 保证 pi-web P0 门户化可依赖 |
-| R1 自注册 | P0.5 | 教学批量开课需要 |
-| R2 PTY WS、R5 workspaces、R6 容器选择 | P1 | 对应 pi-web P1 |
-| R8 用量、R9 安全增强、ACL | P2 | 后续迭代 |
+| 需求 | 阶段 | 状态 | 备注 |
+|---|---|---|---|
+| R3 部署、R7 稳定性、R4 网关降级 | P0 前置 | ✅ 已实现 | DEPLOYMENT.md / API-REFERENCE.md / LLM 501 语义 |
+| R1 自注册 | P0.5 | ✅ 已实现 | 三模式 + 审批队列 + CSV 导入 + 限流 |
+| R2 PTY WS、R5 workspaces、R6 容器选择 | P1 | ✅ 已实现 | vitest 覆盖 Mock 路径（win32 可跑） |
+| R8 用量、TOTP/邮箱验证、workspace ACL | P2 | ⏳ 未实现 | 后续迭代；R9 密码策略与首登强制改密（P1 部分）已实现 |
