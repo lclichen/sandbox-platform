@@ -35,7 +35,9 @@ export function truncate(input: string, opts: TruncateOptions = {}): TruncateRes
   let content = headLines.join("\n");
   if (Buffer.byteLength(content, "utf8") > maxBytes) {
     // Byte-trim without splitting a multibyte char: cut then validate.
-    content = content.slice(0, maxBytes);
+    // Byte-accurate trim: slicing the STRING cuts UTF-16 code units, which
+    // can still exceed maxBytes on multibyte content and splits surrogate pairs.
+    content = Buffer.from(content, "utf8").subarray(0, maxBytes).toString("utf8");
   }
   return { content, truncated: true, totalLines, totalBytes };
 }

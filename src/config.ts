@@ -5,6 +5,21 @@
  * testable and free of scattered `process.env` reads.
  */
 import "dotenv/config";
+import { fileURLToPath } from "node:url";
+import { dirname, isAbsolute, resolve as pathResolve } from "node:path";
+
+/**
+ * Package root (the directory containing src/): data-dir DEFAULTS and any
+ * RELATIVE env-provided paths resolve against this, NOT process.cwd() — the
+ * deployment tree must be relocatable (launchable from any cwd / systemd /
+ * packaged) without silently scattering data.
+ */
+export const APP_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/** Resolve a possibly-relative path against the package root. */
+export function resolveAppPath(value: string): string {
+  return isAbsolute(value) ? value : pathResolve(APP_ROOT, value);
+}
 
 function required(name: string, fallback: string): string {
   const value = process.env[name];
@@ -98,6 +113,9 @@ export interface AppConfig {
       username: string | undefined;
       privateKeyPath: string | undefined;
       password: string | undefined;
+      /** Remote-node base dirs (paths on the COMPUTE node, not local). */
+      overlayBaseDir: string;
+      seedBaseDir: string;
     };
     apptainer: {
       bin: string;
@@ -172,7 +190,7 @@ export function loadConfig(): AppConfig {
     metricsToken: optional("METRICS_TOKEN"),
     db: {
       dialect: asDialect(required("DB_DIALECT", "sqlite")),
-      sqlitePath: required("DB_SQLITE_PATH", "./data/sandbox.db"),
+      sqlitePath: resolveAppPath(required("DB_SQLITE_PATH", "./data/sandbox.db")),
       postgresUrl: optional("DATABASE_URL"),
     },
     auth: {
@@ -209,12 +227,15 @@ export function loadConfig(): AppConfig {
         username: optional("SSH_USERNAME"),
         privateKeyPath: optional("SSH_PRIVATE_KEY_PATH"),
         password: optional("SSH_PASSWORD"),
+        /** Remote-node base dirs (paths on the COMPUTE node, not local). */
+        overlayBaseDir: required("SSH_OVERLAY_BASE_DIR", "/srv/apptainer/overlays"),
+        seedBaseDir: required("SSH_SEED_BASE_DIR", "/srv/apptainer/workspace-seeds"),
       },
       apptainer: {
         bin: required("APPTAINER_BIN", "apptainer"),
-        overlayBaseDir: required("OVERLAY_BASE_DIR", "./data/overlays"),
-        imageBaseDir: required("IMAGE_BASE_DIR", "./data/images"),
-        workspaceBaseDir: required("WORKSPACE_BASE_DIR", "./data/workspaces"),
+        overlayBaseDir: resolveAppPath(required("OVERLAY_BASE_DIR", "./data/overlays")),
+        imageBaseDir: resolveAppPath(required("IMAGE_BASE_DIR", "./data/images")),
+        workspaceBaseDir: resolveAppPath(required("WORKSPACE_BASE_DIR", "./data/workspaces")),
         resourceLimits: bool("APPTAINER_RESOURCE_LIMITS", false),
       },
     },

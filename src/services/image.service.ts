@@ -8,6 +8,20 @@
 import type { Database, SqlValue } from "../db/driver.ts";
 import { decodeJson, encodeJson } from "../db/driver.ts";
 import { ConflictError, NotFoundError } from "../utils/errors.ts";
+import { isAbsolute, resolve } from "node:path";
+import { loadConfig } from "../config.ts";
+
+/**
+ * Resolve an image's sif_path for executor use. Absolute paths pass through
+ * unchanged; RELATIVE paths resolve against IMAGE_BASE_DIR so a deployment
+ * ships as one relocatable tree — register sif_path as "images/ubuntu.sif"
+ * and place the file at <IMAGE_BASE_DIR>/images/ubuntu.sif. No more baked-in
+ * /srv/... absolute paths.
+ */
+export function resolveImagePath(sifPath: string): string {
+  if (isAbsolute(sifPath)) return sifPath;
+  return resolve(loadConfig().executor.apptainer.imageBaseDir, sifPath);
+}
 
 export interface ImageRow {
   id: number;

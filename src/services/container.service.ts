@@ -12,7 +12,7 @@ import { encodeJson, decodeJson } from "../db/driver.ts";
 import type { SandboxExecutor, ContainerHandle } from "../executors/types.ts";
 import { handleFromRow, persistRunningState } from "../executors/types.ts";
 import { createQuotaService, type ResourceRequest } from "./quota.service.ts";
-import { createImageService } from "./image.service.ts";
+import { createImageService, resolveImagePath } from "./image.service.ts";
 import { createWorkspaceService } from "./workspace.service.ts";
 import {
   NotFoundError,
@@ -208,7 +208,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       try {
         const handle = await executor.create({
           id: instanceName,
-          imagePath: image.sif_path,
+          imagePath: resolveImagePath(image.sif_path),
           cpu: request.cpu,
           memoryMb: request.memory_mb,
           diskGb: request.disk_gb,
@@ -254,20 +254,27 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           id,
           "auto-%",
         );
+        if (snap) {
+          await this._restoreFromSnapshot(row, snap);
+          // Clear the marker only AFTER a successful restore — clearing first
+          // orphans the resume snapshot on failure (the next start would fall
+          // through to the stale overlay).
+          await db.run(
+            "UPDATE containers SET auto_stopped = 0, auto_stopped_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            id,
+          );
+          return (await this.requireById(id))!;
+        }
         await db.run(
           "UPDATE containers SET auto_stopped = 0, auto_stopped_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           id,
         );
-        if (snap) {
-          await this._restoreFromSnapshot(row, snap);
-          return (await this.requireById(id))!;
-        }
         // No snapshot to resume from — fall through to a plain overlay start.
       }
       const image = await images.requireById(row.image_id);
       const handle = await executor.create({
         id: row.instance_name!,
-        imagePath: image.sif_path,
+        imagePath: resolveImagePath(image.sif_path),
         cpu: row.cpu,
         memoryMb: row.memory_mb,
         diskGb: row.disk_gb,
@@ -305,6 +312,17 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         // Even if destroy fails on the runtime side, mark destroyed in DB.
         logger.warn({ err, containerId: id }, "executor destroy error (container still marked destroyed)");
       }
+      // Snapshot copies belong to the container: free the disk + rows so the
+      // user's aggregate quota is not permanently inflated after destroys.
+      const snaps = await db.all<{ overlay_path: string }>(
+        "SELECT overlay_path FROM snapshots WHERE container_id = ?",
+        id,
+      );
+      for (const snap of snaps) {
+        await executor.removePath(snap.overlay_path, row.node ?? undefined).catch(() => undefined);
+      }
+      await db.run("DELETE FROM snapshots WHERE container_id = ?", id);
+      await db.run("DELETE FROM overlays WHERE container_id = ?", id);
       await db.run(
         "UPDATE containers SET status = 'destroyed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         id,
@@ -339,8 +357,10 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           logger.warn({ id, err: (err as Error).message }, "snapshot: pre-copy stop failed; copying anyway");
         }
       }
+      let copied: string | undefined;
       try {
         const snap = await executor.snapshot(handle, name);
+        copied = snap.overlayPath;
         // P2-5: the copy already happened on disk, but refuse to record it if
         // it would push the user past their aggregate disk ceiling.
         await quotas.assertAggregateDisk(userId, snap.sizeBytes);
@@ -353,6 +373,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           snap.overlayPath,
           snap.sizeBytes,
         );
+        copied = undefined; // recorded — the row now owns the copy
         // P3-1 overlay maintenance: link the snapshot to the current overlay
         // row and refresh that row's size_bytes (a snapshot is a copy of the
         // overlay, so its size approximates the overlay's usage).
@@ -369,16 +390,22 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           await db.run("UPDATE overlays SET size_bytes = ? WHERE id = ?", snap.sizeBytes, overlayRow.id);
         }
         return { id: Number(result.lastInsertRowid), name, sizeBytes: snap.sizeBytes };
+      } catch (err) {
+        // Quota-refused (or insert failed) AFTER the disk copy: delete the
+        // orphan so it never counts or leaks (the reaper hit this constantly
+        // for over-quota users).
+        if (copied) await executor.removePath(copied, row.node ?? undefined).catch(() => undefined);
+        throw err;
       } finally {
         if (wasRunning && opts.restartAfter !== false) {
           try {
             // Resume from the existing overlay via create (which carries the
-            // image path) — executor.start(handle) cannot rebuild the full
+            // image path) — a bare executor.start() cannot rebuild the full
             // instance-start command for SSH/CLI from a DB-derived handle.
             const image = await images.requireById(row.image_id);
             await executor.create({
               id: row.instance_name!,
-              imagePath: image.sif_path,
+              imagePath: resolveImagePath(image.sif_path),
               cpu: row.cpu,
               memoryMb: row.memory_mb,
               diskGb: row.disk_gb,
@@ -386,7 +413,10 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
               env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
             });
           } catch (err) {
-            logger.warn({ id, err: (err as Error).message }, "snapshot: restart after copy failed");
+            // The instance is stopped but the row says running — every later
+            // tool call would fail with "instance not found". Mark stopped.
+            logger.warn({ id, err: (err as Error).message }, "snapshot: restart after copy failed; marking stopped");
+            await persistRunningState(db, id, false).catch(() => undefined);
           }
         }
       }
@@ -412,7 +442,11 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       return (await this.requireById(id))!;
     },
 
-    /** Shared restore path: quiesce the current instance, restore overlay, start. */
+    /** Shared restore path: quiesce the current instance, restore overlay, start.
+     *  On failure the row is marked stopped (the instance WAS stopped above and
+     *  the executor may already have swapped the overlay) — leaving it "running"
+     *  produced the classic zombie: every tool call fails with "instance not
+     *  found" until a manual stop. */
     async _restoreFromSnapshot(row: ContainerRow, snap: { id: number; name: string; overlay_path: string; size_bytes?: number }): Promise<void> {
       const image = await images.requireById(row.image_id);
       // Stop current instance if running, then restore from snapshot overlay.
@@ -423,36 +457,56 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           // ignore
         }
       }
-      const handle = await executor.restore(
-        { id: `${row.instance_name}:${snap.name}`, overlayPath: snap.overlay_path, sizeBytes: 0 },
-        {
-          id: row.instance_name!,
-          imagePath: image.sif_path,
-          cpu: row.cpu,
-          memoryMb: row.memory_mb,
-          diskGb: row.disk_gb,
-          env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
-        },
-      );
-      await db.run(
-        "UPDATE containers SET status = 'running', overlay_path = ?, node = ?, last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        handle.overlayPath,
-        handle.node,
-        row.id,
-      );
-      // P3-1: the restored overlay is now the current one; demote previous
-      // overlay rows and record the new path.
-      await db.run("UPDATE overlays SET is_current = 0 WHERE container_id = ?", row.id);
-      await db.run(
-        "INSERT INTO overlays (container_id, path, is_current, size_bytes) VALUES (?, ?, 1, ?)",
-        row.id,
-        handle.overlayPath,
-        snap.size_bytes ?? 0,
-      );
+      try {
+        const handle = await executor.restore(
+          { id: `${row.instance_name}:${snap.name}`, overlayPath: snap.overlay_path, sizeBytes: 0 },
+          {
+            id: row.instance_name!,
+            imagePath: resolveImagePath(image.sif_path),
+            cpu: row.cpu,
+            memoryMb: row.memory_mb,
+            diskGb: row.disk_gb,
+            env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
+          },
+        );
+        await db.run(
+          "UPDATE containers SET status = 'running', overlay_path = ?, node = ?, last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, error_message = NULL WHERE id = ?",
+          handle.overlayPath,
+          handle.node,
+          row.id,
+        );
+        // P3-1: the restored overlay is now the current one; demote previous
+        // overlay rows and record the new path.
+        await db.run("UPDATE overlays SET is_current = 0 WHERE container_id = ?", row.id);
+        await db.run(
+          "INSERT INTO overlays (container_id, path, is_current, size_bytes) VALUES (?, ?, 1, ?)",
+          row.id,
+          handle.overlayPath,
+          snap.size_bytes ?? 0,
+        );
+      } catch (err) {
+        await db.run(
+          "UPDATE containers SET status = 'stopped', error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          `snapshot restore failed: ${(err as Error).message}`.slice(0, 500),
+          row.id,
+        ).catch(() => undefined);
+        throw err;
+      }
     },
 
     async deleteSnapshot(id: number, snapshotId: number, userId: number, isAdmin = false): Promise<void> {
-      await this.requireOwned(id, userId, isAdmin);
+      const row = await this.requireOwned(id, userId, isAdmin);
+      const snap = await db.get<{ overlay_path: string }>(
+        "SELECT overlay_path FROM snapshots WHERE id = ? AND container_id = ?",
+        snapshotId,
+        id,
+      );
+      // Free the disk copy too — deleting only the row leaked the full size.
+      if (snap) {
+        await executor.removePath(snap.overlay_path, row.node ?? undefined).catch((err) => {
+          logger.warn({ snapshotId, err: (err as Error).message }, "deleteSnapshot: file cleanup failed (row still deleted)");
+        });
+      }
       await db.run("DELETE FROM snapshots WHERE id = ? AND container_id = ?", snapshotId, id);
     },
 

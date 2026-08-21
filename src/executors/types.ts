@@ -135,14 +135,9 @@ export interface SandboxExecutor {
   isAvailable(): Promise<boolean>;
   /** Create + start an instance with a fresh overlay. */
   create(req: CreateRequest): Promise<ContainerHandle>;
-  /** Start a stopped instance (re-attach overlay). */
-  /**
-   * Start an existing (stopped) container. Optionally pass `env` to (re)apply
-   * environment overrides stored out-of-band (e.g. in containers.env); when
-   * omitted, executors that persist env on the handle reuse it. Implementations
-   * that create instances (rather than resuming a live one) MUST honor env.
-   */
-  start(handle: ContainerHandle, env?: Record<string, string>): Promise<void>;
+  // NOTE: a bare start(handle) was removed from the interface — it was never
+  // called (container.service rebuilds via create(), which carries the image
+  // path), and its overlay-as-image fallback could never boot.
   /** Stop a running instance gracefully (overlay retained). */
   stop(handle: ContainerHandle): Promise<void>;
   /** Destroy the instance AND its overlay (irreversible). */
@@ -151,6 +146,9 @@ export interface SandboxExecutor {
   snapshot(handle: ContainerHandle, name: string): Promise<SnapshotHandle>;
   /** Re-create an instance from a snapshot's overlay. */
   restore(snapshot: SnapshotHandle, req: CreateRequest): Promise<ContainerHandle>;
+  /** Delete an overlay/snapshot copy on the executor's filesystem (node-scoped
+   *  where applicable). Best-effort contract: resolve even when absent. */
+  removePath(path: string, node?: string): Promise<void>;
 
   // ---- file/command operations (relayed by the tools routes) ----
   readFile(handle: ContainerHandle, path: string): Promise<Buffer>;

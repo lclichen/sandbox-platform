@@ -7,8 +7,9 @@
  * commands run locally via child_process.
  */
 import { spawn } from "node:child_process";
-import { mkdir, rm, cp, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, rm, cp, stat, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type {
   SandboxExecutor,
   ExecutorKind,
@@ -44,8 +45,11 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   constructor() {
     const config = loadConfig();
     this.bin = config.executor.apptainer.bin;
-    this.overlayBase = config.executor.apptainer.overlayBaseDir;
-    this.snapshotBase = `${config.executor.apptainer.overlayBaseDir}/snapshots`;
+    // Resolve to ABSOLUTE paths: the config defaults are relative
+    // ("./data/overlays") and `--overlay ./data/...` silently depends on the
+    // platform process's cwd — breakage looks like a missing instance later.
+    this.overlayBase = resolve(config.executor.apptainer.overlayBaseDir);
+    this.snapshotBase = resolve(config.executor.apptainer.overlayBaseDir, "snapshots");
     this.resourceLimits = config.executor.apptainer.resourceLimits;
   }
 
@@ -62,6 +66,16 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   }
 
   async create(req: CreateRequest): Promise<ContainerHandle> {
+    // Fail fast on a misconfigured image: sif_path comes straight from the DB
+    // (the seed migration ships demo rows with placeholder /srv/apptainer
+    // paths). Starting from a non-existent image fails AFTER the container row
+    // is already marked running, surfacing later as a baffling
+    // "instance not found" on every tool call.
+    if (!existsSync(req.imagePath)) {
+      throw new Error(
+        `镜像文件不存在: ${req.imagePath}（该镜像记录的 sif_path 无效——请在管理台修正后重试；种子数据自带的是示例路径）`,
+      );
+    }
     const overlayPath = this.overlayPathFor(req.id);
     // P1-6: bounded ext3 overlay when possible (manual §2.2); fall back to a
     // directory overlay if `apptainer overlay create` is unavailable.
@@ -69,7 +83,6 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     // Seed the overlay's /workspace from a host-side workspace directory. The
     // overlay is a directory this executor manages locally, so a plain cp lands
     // the files where the container will see them mounted.
-    let bindArgs: string[] = [];
     if (req.seedFromPath) {
       try {
         const seedTarget = `${overlayPath}/workspace`;
@@ -79,17 +92,16 @@ export class ApptainerCliExecutor implements SandboxExecutor {
         logger.warn({ id: req.id, seedFromPath: req.seedFromPath, err: (err as Error).message }, "ApptainerCliExecutor: workspace seed copy failed");
       }
     }
-    await this.runCli([
+    await this.runLifecycle([
       "instance", "start",
       ...ISOLATION_FLAGS,
       // Resource limits need cgroup support; only apply when enabled (default
-      // OFF: rootless + cgroup-v1 hosts fail with "rootless cgroups requires
-      // cgroups v2").
+      // OFF: rootless + cgroup-v1 hosts fail instance start with "rootless
+      // cgroups requires cgroups v2").
       ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       ...envArgs(req.env),
       "--overlay", overlayPath,
-      ...bindArgs,
       req.imagePath,
       req.id,
     ]);
@@ -135,16 +147,6 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await mkdir(overlayPath, { recursive: true });
   }
 
-  async start(handle: ContainerHandle, env?: Record<string, string>): Promise<void> {
-    const args = ["instance", "start", ...ISOLATION_FLAGS, ...envArgs(env ?? handle.env), "--overlay", handle.overlayPath];
-    if (handle.imagePath) args.push(handle.imagePath);
-    else args.push(handle.overlayPath);
-    args.push(handle.id);
-    await this.runCli(args);
-    await this.ensureWorkspaceDir(handle.id);
-    handle.running = true;
-  }
-
   async stop(handle: ContainerHandle): Promise<void> {
     try {
       await this.runCli(["instance", "stop", handle.id]);
@@ -152,6 +154,10 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       // instance may already be stopped
     }
     handle.running = false;
+  }
+
+  async removePath(path: string, _node?: string): Promise<void> {
+    await rm(path, { recursive: true, force: true });
   }
 
   async destroy(handle: ContainerHandle): Promise<void> {
@@ -179,33 +185,53 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     const overlayPath = this.overlayPathFor(req.id);
     await rm(overlayPath, { recursive: true, force: true });
     await cp(snapshot.overlayPath, overlayPath, { recursive: true });
-    await this.runCli([
+    // env overrides must survive restore (LLM keys ride here)
+    await this.runLifecycle([
       "instance", "start",
       ...ISOLATION_FLAGS,
       ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
+      ...envArgs(req.env),
       "--overlay", overlayPath,
       req.imagePath,
       req.id,
     ]);
     await this.ensureWorkspaceDir(req.id);
-    return { id: req.id, node: "local", overlayPath, running: true, imagePath: req.imagePath };
+    return { id: req.id, node: "local", overlayPath, running: true, imagePath: req.imagePath, env: req.env };
   }
 
   async readFile(handle: ContainerHandle, path: string): Promise<Buffer> {
-    const r = await this.runCli(["exec", `instance://${handle.id}`, "cat", path]);
-    return Buffer.from(r.stdout, "utf8");
+    // base64 (not cat): a UTF-8 string round-trip mangles any non-UTF-8 file.
+    // GNU base64 wraps at 76 cols — strip all whitespace before decoding
+    // (mirrors ssh-executor).
+    const r = await this.runCli(["exec", `instance://${handle.id}`, "base64", path]);
+    if (r.exitCode !== 0) throw new Error(`readFile failed (exit ${r.exitCode}): ${path}`);
+    return Buffer.from(r.stdout.replace(/\s/g, ""), "base64");
   }
 
   async writeFile(handle: ContainerHandle, path: string, content: Buffer): Promise<void> {
-    const b64 = content.toString("base64");
+    // Stream the base64 through stdin: embedding it in one argv element hits
+    // Linux MAX_ARG_STRLEN (128 KiB) and fails with E2BIG for larger files.
     // P3-2: shell-quote the path so spaces/quotes in filenames cannot inject.
     const quoted = shellQuote(path);
-    await this.runCli(["exec", `instance://${handle.id}`, "sh", "-c", `mkdir -p "$(dirname -- ${quoted})" && echo '${b64}' | base64 -d > ${quoted}`]);
+    const inner = `mkdir -p "$(dirname -- ${quoted})" && base64 -d > ${quoted}`;
+    await new Promise<void>((resolveFn, reject) => {
+      const child = spawn(this.bin, ["exec", `instance://${handle.id}`, "sh", "-c", inner], { windowsHide: true });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) resolveFn();
+        else reject(new Error(`writeFile failed (exit ${code}): ${path}`));
+      });
+      child.stdin.on("error", () => { /* EPIPE if the child dies early; close reports */ });
+      child.stdin.end(content.toString("base64"));
+    });
   }
 
   async access(handle: ContainerHandle, path: string): Promise<void> {
-    await this.runCli(["exec", `instance://${handle.id}`, "test", "-e", path]);
+    // tools.service maps THROW => not-exists; a resolved non-zero exit used
+    // to report every path as existing.
+    const r = await this.runCli(["exec", `instance://${handle.id}`, "test", "-e", path]);
+    if (r.exitCode !== 0) throw new Error(`not found: ${path}`);
   }
 
   async readdir(handle: ContainerHandle, path: string): Promise<string[]> {
@@ -274,20 +300,42 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     };
   }
 
-  /** Size of a snapshot dir in bytes, measured on the HOST (du -sb). */
+  /** Size of a snapshot dir in bytes, measured on the HOST (du -sb, with a
+   *  JS-walk fallback for non-GNU du — a silent 0 would bypass disk quotas). */
   private async hostDirSize(dir: string): Promise<number> {
-    return new Promise((resolveFn) => {
+    const duResult = await new Promise<number | null>((resolveFn) => {
       const child = spawn("du", ["-sb", dir], { windowsHide: true });
       let out = "";
       child.stdout.on("data", (d: Buffer) => {
         out += d.toString("utf8");
       });
-      child.on("error", () => resolveFn(0));
+      child.on("error", () => resolveFn(null));
       child.on("close", (code) => {
-        if (code !== 0) return resolveFn(0);
+        if (code !== 0) return resolveFn(null);
         resolveFn(Number.parseInt(out.trim().split(/\s+/)[0] ?? "0", 10) || 0);
       });
     });
+    if (duResult !== null) return duResult;
+    try {
+      return await walkSize(dir);
+    } catch {
+      logger.warn({ dir }, "ApptainerCliExecutor: snapshot size unknown (du and walk failed); recording 0");
+      return 0;
+    }
+  }
+
+  /**
+   * Lifecycle commands (instance start) MUST fail loudly: a non-zero exit
+   * used to resolve normally, the container row was then marked running, and
+   * every later tool call failed with "instance not found".
+   */
+  private async runLifecycle(args: string[]): Promise<ExecResult> {
+    const r = await this.runCli(args);
+    if (r.exitCode !== 0) {
+      const detail = r.stderr.trim().slice(0, 500) || r.stdout.trim().slice(0, 200);
+      throw new Error(`apptainer ${args[0]} ${args[1] ?? ""} 失败 (exit ${r.exitCode}): ${detail}`);
+    }
+    return r;
   }
 
   private runCli(args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
@@ -350,7 +398,22 @@ export function envArgs(env?: Record<string, string>): string[] {
   const out: string[] = [];
   for (const [k, v] of Object.entries(env)) {
     if (!isValidEnvName(k)) continue;
-    out.push("--env", `${k}=${shellQuote(String(v))}`);
+    // Plain KEY=VALUE: this executor spawns argv directly (no shell), so
+    // shell-quoting here would store literal quote characters in the env —
+    // injected LLM keys would never authenticate.
+    out.push("--env", `${k}=${String(v)}`);
   }
   return out;
+}
+
+/** Recursive directory size in bytes (du fallback for non-GNU hosts). */
+async function walkSize(dir: string): Promise<number> {
+  let total = 0;
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) total += await walkSize(full);
+    else total += (await stat(full)).size;
+  }
+  return total;
 }

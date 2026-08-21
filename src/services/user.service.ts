@@ -182,6 +182,9 @@ export function createUserService(db: Database) {
     async delete(id: number): Promise<void> {
       const current = await this.getById(id);
       if (!current) throw new NotFoundError("User", id);
+      // llm_user_bindings.granted_by REFERENCES users(id) with no ON DELETE
+      // action — null the references first or the FK violation aborts the delete.
+      await db.run("UPDATE llm_user_bindings SET granted_by = NULL WHERE granted_by = ?", id).catch(() => undefined);
       await db.run("DELETE FROM users WHERE id = ?", id);
     },
   };

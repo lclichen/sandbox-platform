@@ -12,7 +12,16 @@ import { mkdir, access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { resolve, extname, posix as posixPath } from "node:path";
 import { fileURLToPath } from "node:url";
+import { timingSafeEqual } from "node:crypto";
 import { toHttpError, HttpError } from "./utils/errors.ts";
+
+/** Constant-time string compare (length leak is acceptable for bearer tokens). */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
 import { logger } from "./utils/logger.ts";
 import { loadConfig } from "./config.ts";
 import { createDatabase, type Database } from "./db/driver.ts";
@@ -160,8 +169,8 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.get("/metrics", async (req: Request, res: Response) => {
     const token = loadConfig().metricsToken;
     if (token) {
-      const sent = req.headers.authorization;
-      if (sent !== `Bearer ${token}`) {
+      const sent = req.headers.authorization ?? "";
+      if (!timingSafeEqualStr(sent, `Bearer ${token}`)) {
         res.status(401).json({ code: "UNAUTHORIZED", message: "Metrics require a bearer token (METRICS_TOKEN)." });
         return;
       }
@@ -210,9 +219,11 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   // Serve the admin SPA (web/dist) if it has been built. API routes above take
   // precedence; anything else under a non-/api GET falls through to static
   // files, with a catch-all to index.html for client-side routing.
-  const webDist = resolve(fileURLToPath(import.meta.url), "..", "..", "web", "dist");
+  const webDist = process.env.WEB_DIST_DIR
+    ? resolve(process.env.WEB_DIST_DIR)
+    : resolve(fileURLToPath(import.meta.url), "..", "..", "web", "dist");
   if (existsSync(webDist)) {
-    const indexHtml = posixPath.join(webDist, "index.html");
+    const indexHtml = resolve(webDist, "index.html");
     app.use(
       express.static(webDist, {
         index: false, // handled by the catch-all below

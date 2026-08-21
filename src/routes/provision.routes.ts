@@ -58,7 +58,7 @@ export function provisionRouter(): Router {
       res.json({
         imageId: image?.id ?? null,
         imageName: image?.display_name ?? null,
-        workspaceId: cfg.provision.defaultWorkspaceId || null,
+        workspaceId: workspaceName ? (cfg.provision.defaultWorkspaceId || null) : null,
         workspaceName,
       });
     })().catch(next);

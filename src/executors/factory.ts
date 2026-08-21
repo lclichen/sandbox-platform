@@ -22,8 +22,15 @@ export async function getExecutor(): Promise<SandboxExecutor> {
   const config = loadConfig();
   const preferred = config.executor.kind;
 
+  // In production the fallback chain must NEVER land on the mock executor
+  // silently: it "creates" containers as plain host directories and reports
+  // success — a dangerous degradation that looks like a working deployment.
+  const allowMock =
+    preferred === "mock" || config.nodeEnv !== "production";
+
   // Try the configured executor first, then walk the fallback chain.
-  const order: ExecutorKind[] = [preferred, ...FALLBACK_CHAIN.filter((k) => k !== preferred)];
+  const chain = allowMock ? FALLBACK_CHAIN : FALLBACK_CHAIN.filter((k) => k !== "mock");
+  const order: ExecutorKind[] = [preferred, ...chain.filter((k) => k !== preferred)];
 
   for (const kind of order) {
     const candidate = createExecutor(kind);
@@ -40,7 +47,13 @@ export async function getExecutor(): Promise<SandboxExecutor> {
     }
   }
 
-  // MockExecutor is always available as a last resort (it only needs mkdir).
+  if (!allowMock) {
+    throw new Error(
+      `EXECUTOR_KIND=${preferred} 不可用（探测失败），且生产环境禁止回退到 mock 执行器。请检查 apptainer/ssh 配置后重启。`,
+    );
+  }
+
+  // Dev/demo only: MockExecutor is always available as a last resort.
   logger.warn("No executor available; falling back to MockExecutor unconditionally.");
   cached = new MockExecutor();
   return cached;

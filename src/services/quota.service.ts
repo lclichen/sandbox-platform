@@ -214,8 +214,8 @@ export function createQuotaService(db: Database) {
       const quota = await this.forUser(userId);
       const row = await db.get<{ total: number | string }>(
         `SELECT
-           COALESCE((SELECT SUM(o.size_bytes) FROM overlays o JOIN containers c ON o.container_id = c.id WHERE c.user_id = ?), 0)
-           + COALESCE((SELECT SUM(s.size_bytes) FROM snapshots s JOIN containers c ON s.container_id = c.id WHERE c.user_id = ?), 0)
+           COALESCE((SELECT SUM(o.size_bytes) FROM overlays o JOIN containers c ON o.container_id = c.id WHERE c.user_id = ? AND c.status != 'destroyed'), 0)
+           + COALESCE((SELECT SUM(s.size_bytes) FROM snapshots s JOIN containers c ON s.container_id = c.id WHERE c.user_id = ? AND c.status != 'destroyed'), 0)
            + COALESCE((SELECT SUM(w.size_bytes) FROM workspaces w WHERE w.user_id = ?), 0) AS total`,
         userId,
         userId,

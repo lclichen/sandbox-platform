@@ -119,6 +119,10 @@ export class MockExecutor implements SandboxExecutor {
     this.handles.set(handle.id, handle);
   }
 
+  async removePath(path: string, _node?: string): Promise<void> {
+    await rm(path, { recursive: true, force: true });
+  }
+
   async destroy(handle: ContainerHandle): Promise<void> {
     await rm(this.root(handle), { recursive: true, force: true });
     this.handles.delete(handle.id);
@@ -140,6 +144,8 @@ export class MockExecutor implements SandboxExecutor {
       node: "mock-local",
       overlayPath: join(this.baseDir, req.id),
       running: true,
+      // env overrides must survive restore like the real executors
+      ...(req.env ? { env: req.env } : {}),
     };
     const root = this.root(handle);
     await rm(root, { recursive: true, force: true });

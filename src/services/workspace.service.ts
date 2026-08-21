@@ -151,8 +151,15 @@ export function createWorkspaceService(db: Database) {
       );
       const id = Number(result.lastInsertRowid);
       const storagePath = `user-${userId}/ws-${id}`;
-      // Create the directory and stamp the canonical storage_path.
-      await storage.ensureWorkspaceDir(userId, id);
+      // Create the directory and stamp the canonical storage_path. On failure
+      // remove the row again — an orphan ws-pending row counts against the
+      // user's workspace quota forever.
+      try {
+        await storage.ensureWorkspaceDir(userId, id);
+      } catch (err) {
+        await db.run("DELETE FROM workspaces WHERE id = ?", id).catch(() => undefined);
+        throw err;
+      }
       await db.run(
         "UPDATE workspaces SET storage_path = ? WHERE id = ?",
         storagePath,

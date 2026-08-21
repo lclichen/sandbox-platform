@@ -46,23 +46,32 @@ import { validate } from "./validate.ts";
  */
 const rawUpload = Router().post(
   "/:id/files",
-  (req, _res, next) => {
+  (req, res, next) => {
     // Collect the raw body manually; works regardless of Content-Type.
     const max = loadConfig().workspace.uploadMaxBytes;
     const chunks: Buffer[] = [];
     let received = 0;
+    let rejected = false;
     req.on("data", (chunk: Buffer) => {
+      if (rejected) return;
       chunks.push(chunk);
       received += chunk.byteLength;
       if (received > max) {
-        req.destroy(new Error("upload too large"));
+        // Respond FIRST, then drop the connection: destroying before writing
+        // left the client with ECONNRESET instead of a 413.
+        rejected = true;
+        chunks.length = 0;
+        res.status(413).json({ code: "UPLOAD_TOO_LARGE", message: `upload exceeds ${max} bytes` });
+        req.destroy();
       }
     });
     req.on("end", () => {
+      if (rejected) return;
       req.body = Buffer.concat(chunks);
       next();
     });
     req.on("error", (err) => {
+      if (rejected) return;
       next(err);
     });
   },
@@ -300,7 +309,9 @@ export function workspacesRouter(): Router {
     const svc = createWorkspaceService(getDb(req));
     svc
       .uploadPart(id, a.id, uid, part, content, a.isAdmin)
-      .then((result) => res.status(204).json(result))
+      // 204 must carry no body (Node silently dropped the .json() payload, so
+      // clients have always seen a bare 204 — keep that wire behavior).
+      .then(() => res.status(204).end())
       .catch(next);
   });
 

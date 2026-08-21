@@ -116,6 +116,8 @@ export function toolsRouter(): Router {
     const { command, cwd, timeout } = body;
 
     res.setHeader("Content-Type", "text/event-stream");
+    // nginx buffers SSE by default; batches events into visible delays.
+    res.setHeader("X-Accel-Buffering", "no");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();

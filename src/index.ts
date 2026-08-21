@@ -53,12 +53,13 @@ async function main() {
 
   // R2: interactive container terminals ride the same HTTP server
   // (/api/v1/containers/:id/pty WebSocket upgrades).
-  attachPtyServer(server, { db, executor: await getExecutor() });
+  const ptyServer = attachPtyServer(server, { db, executor: await getExecutor() });
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Shutting down...");
     reaper?.stop();
-    server.close();
+    ptyServer.close();
+    await new Promise<void>((resolveFn) => server.close(() => resolveFn()));
     await closeDatabase();
     process.exit(0);
   };

@@ -65,7 +65,7 @@ interface ClientFrame {
  * Attach the PTY WebSocket endpoint to an existing HTTP server (index.ts).
  * State (per-container connection counts) is scoped to this attachment.
  */
-export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): void {
+export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { close(): void } {
   const { db, executor } = deps;
   const wss = new WebSocketServer({ noServer: true });
   const openPerContainer = new Map<number, number>();
@@ -82,6 +82,10 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): void {
   };
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    // Raw upgrade sockets with no error listener can crash the process when
+    // the client aborts mid-handshake; the async guards below may also write
+    // to an already-destroyed socket.
+    socket.on("error", () => { /* handled via writability guards */ });
     void (async () => {
       const url = new URL(req.url ?? "/", "http://localhost");
       const match = PTY_PATH_RE.exec(url.pathname);
@@ -136,6 +140,10 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): void {
       }
 
       wss.handleUpgrade(req, socket, head, (ws) => {
+        // Increment SYNCHRONOUSLY: the limit check above runs before the async
+        // openSession, so concurrent upgrades could each pass the check and
+        // exceed PTY_MAX_PER_CONTAINER. settle() decrements in every path.
+        increment(containerId);
         bridgePty(ws, executor, {
           containerId,
           containerUserId: row.user_id,
@@ -144,14 +152,30 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): void {
           overlayPath: row.overlay_path ?? "",
         }).catch((err) => {
           logger.error({ err: (err as Error).message, containerId }, "PTY bridge failed after upgrade.");
+          decrement(containerId);
           ws.close(1011, "pty error");
         });
       });
     })().catch((err) => {
       logger.error({ err: (err as Error).message }, "PTY upgrade error.");
-      rejectHttp(socket, 500, "INTERNAL_ERROR", "Upgrade failed");
+      if (socket.writable) rejectHttp(socket, 500, "INTERNAL_ERROR", "Upgrade failed");
     });
   });
+
+  return {
+    // Close PTY websockets on shutdown: server.close() alone stalls on open
+    // sockets and process.exit then force-kills them without close codes.
+    close(): void {
+      for (const client of wss.clients) {
+        try {
+          client.terminate();
+        } catch {
+          /* already gone */
+        }
+      }
+      wss.close();
+    },
+  };
 
   async function bridgePty(
     ws: WebSocket,
@@ -167,7 +191,6 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): void {
     const cfg = loadConfig();
     const svc = createContainerService(db, exec);
     const sessionId = await svc.openSession(info.containerId, info.containerUserId);
-    increment(info.containerId);
 
     let bytesIn = 0;
     let bytesOut = 0;
@@ -184,6 +207,15 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): void {
       });
       logger.info({ containerId: info.containerId, sessionId, reason, bytesIn, bytesOut }, "PTY session closed.");
     };
+
+    // Track client loss BEFORE the openPty await: if the socket closes while
+    // openPty is pending, the late close handler below would never fire and
+    // the pty process + session row would leak until the 30-min idle sweep.
+    let clientGone = false;
+    const earlyClose = () => {
+      clientGone = true;
+    };
+    ws.on("close", earlyClose);
 
     // Keepalive + idle sweep: ping every 30s (pong refreshes lastActivity);
     // kill sessions with no client traffic beyond the idle timeout.
@@ -214,9 +246,21 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): void {
         { cols: 80, rows: 24 },
       );
     } catch (err) {
+      ws.off("close", earlyClose);
       settle("open-failed");
       logger.error({ err: (err as Error).message, containerId: info.containerId }, "openPty failed.");
       ws.close(1011, "pty unavailable");
+      return;
+    }
+    ws.off("close", earlyClose);
+    if (clientGone) {
+      // Client vanished while openPty was pending — kill the orphan process.
+      try {
+        pty.kill();
+      } catch {
+        /* already gone */
+      }
+      settle("client-closed-during-open");
       return;
     }
 

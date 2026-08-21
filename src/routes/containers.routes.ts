@@ -167,7 +167,7 @@ export function containersRouter(): Router {
   router.post("/:id/snapshots/:sid/restore", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const sid = Number.parseInt(req.params.sid, 10);
-    if (Number.isNaN(sid)) {
+    if (!Number.isInteger(sid) || sid <= 0) {
       res.status(400).json({ code: "BAD_REQUEST", message: "Invalid snapshot id" });
       return;
     }
@@ -181,7 +181,7 @@ export function containersRouter(): Router {
   router.delete("/:id/snapshots/:sid", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const sid = Number.parseInt(req.params.sid, 10);
-    if (Number.isNaN(sid)) {
+    if (!Number.isInteger(sid) || sid <= 0) {
       res.status(400).json({ code: "BAD_REQUEST", message: "Invalid snapshot id" });
       return;
     }

@@ -53,7 +53,7 @@ function parseUsersCsv(csv: string): Array<{ username: string; password: string;
     const line = lines[i].trim();
     if (!line || line.startsWith("#")) continue;
     const cells = line.split(",").map((c) => c.trim());
-    if (i === 0 && cells[0].toLowerCase() === "username") continue; // header
+    if (cells[0].toLowerCase() === "username") continue; // header (skip wherever it appears — leading comments/blank lines used to defeat the i===0 check)
     const [username, password, email] = cells;
     out.push({ username, password, email: email || undefined });
   }

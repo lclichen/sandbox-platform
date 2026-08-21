@@ -96,15 +96,15 @@ describe("cli envArgs", () => {
   });
 
   it("renders interleaved --env / KEY=VALUE arg pairs", () => {
-    expect(envArgs({ FOO: "bar" })).toEqual(["--env", "FOO='bar'"]);
+    expect(envArgs({ FOO: "bar" })).toEqual(["--env", "FOO=bar"]);
   });
 
   it("drops entries with invalid key names", () => {
     expect(envArgs({ "BAD KEY": "x" })).toEqual([]);
-    expect(envArgs({ GOOD: "1", "ba;d": "2" })).toEqual(["--env", "GOOD='1'"]);
+    expect(envArgs({ GOOD: "1", "ba;d": "2" })).toEqual(["--env", "GOOD=1"]);
   });
 
   it("quotes values with metacharacters", () => {
-    expect(envArgs({ X: "hello world" })).toEqual(["--env", "X='hello world'"]);
+    expect(envArgs({ X: "hello world" })).toEqual(["--env", "X=hello world"]);
   });
 });
