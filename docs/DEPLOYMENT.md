@@ -6,6 +6,8 @@
 
 ## 0. 前置条件
 
+> **可迁移部署**：数据目录（`DB_SQLITE_PATH` / `OVERLAY_BASE_DIR` / `IMAGE_BASE_DIR` / `WORKSPACE_BASE_DIR`）的默认值和任何相对取值都按**包根**（仓库根目录）解析而非进程 cwd——换 systemd 工作目录、npm-global 启动或整树打包搬迁都不会散落数据。管理台静态资源默认取 `web/dist`，拆分部署时用 `WEB_DIST_DIR` 指定。生产环境执行器探测失败会**拒绝启动**（不再静默回退 mock）。
+
 | 组件 | 要求 |
 |---|---|
 | Node.js | ≥ 20.11（后端用 `--experimental-transform-types` 直跑 TS） |
@@ -139,8 +141,8 @@ sudo systemctl enable --now sandbox-platform
 | Apptainer 安装 | **rootless**（官方脚本 `install-unprivileged.sh` 装到 `~/.local`），版本 ≥ 1.3 |
 | SSH 账号 | 专用低权限账号（如 `sandbox-run`），禁用 shell 登录仅允许 sftp/exec 可省略——执行器只用 exec/putDirectory |
 | 密钥文件 | `SSH_PRIVATE_KEY_PATH` 指向平台侧私钥；`chmod 600`；建议 ed25519；放在 `ProtectSystem=strict` 可读路径（如 `/etc/sandbox/`，加 `ReadOnlyPaths=`） |
-| 远端目录 | `/srv/apptainer/overlays`、`/srv/apptainer/workspace-seeds` 需对 SSH 账号可写：`install -d -o sandbox-run /srv/apptainer/{overlays,workspace-seeds}` |
-| 镜像目录 | `IMAGE_BASE_DIR` 若与远端 `sif_path` 不一致，以 DB 中登记的远端路径为准（SSH 执行器在远端解析） |
+| 远端目录 | 默认 `/srv/apptainer/overlays`、` /srv/apptainer/workspace-seeds`（可用 `SSH_OVERLAY_BASE_DIR` / `SSH_SEED_BASE_DIR` 覆盖），需对 SSH 账号可写：`install -d -o sandbox-run <目录>` |
+| 镜像目录 | `IMAGE_BASE_DIR` 若与远端 `sif_path` 不一致，以 DB 中登记的远端路径为准（SSH 执行器在远端解析）；**本地（apptainer-cli）执行器下 `sif_path` 支持相对路径**（相对 `IMAGE_BASE_DIR` 解析，整个部署树可打包搬迁）。镜像获取见 `docs/IMAGES.md`——安装后镜像目录为空，需登记真实存在的 SIF |
 | cgroups | 需要 `--cpus/--memory` 限额时设 `APPTAINER_RESOURCE_LIMITS=true`，要求 cgroups v2（rootless + v1 会报 "rootless cgroups requires cgroups v2"） |
 | 资源上限 | 每用户走配额（`resource_quotas`），配额白名单（`allowed_image_ids`）限定可选镜像 |
 | LLM | 可选组件，见 README "LiteLLM（可选）"；`LLM_ENABLED=false`（默认）时整组 `/api/v1/*llm*` 返回 501，容器不注入任何 `SANDBOX_LLM_*` |
