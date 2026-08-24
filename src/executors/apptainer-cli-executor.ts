@@ -257,11 +257,13 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   }
 
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {
-    // Prefix with `cd <cwd> &&` so commands run inside the container workspace,
-    // not in the inherited host cwd (which leaks in without --contain). Mirrors
-    // the SSH executor's cwd handling.
+    // --pwd /workspace: `apptainer exec` inherits the CALLING process's cwd
+    // (a host path missing in-container), and without --pwd apptainer prints
+    // "Error changing the container working directory" and falls back to
+    // /home/<user> — noise on every tool call. The explicit `cd` below then
+    // applies the requested cwd on top.
     const cwdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
-    const args = ["exec", `instance://${handle.id}`, "sh", "-c", cwdPrefix + command];
+    const args = ["exec", "--pwd", "/workspace", `instance://${handle.id}`, "sh", "-c", cwdPrefix + command];
     return this.runCli(args, opts);
   }
 
