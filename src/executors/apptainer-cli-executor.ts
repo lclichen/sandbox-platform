@@ -189,6 +189,12 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await this.runLifecycle([
       "instance", "start",
       ...ISOLATION_FLAGS,
+      // Fixed container-side cwd: without --pwd the instance inherits the
+      // platform process cwd (a HOST path that does not exist inside the
+      // container), so every subsequent `apptainer exec` prints
+      // "Error changing the container working directory" and falls back to
+      // /home/<user> — noisy and wrong for both bash tools and PTY shells.
+      "--pwd", "/workspace",
       ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       ...envArgs(req.env),
@@ -266,7 +272,10 @@ export class ApptainerCliExecutor implements SandboxExecutor {
    * shell I/O works. Resize is accepted as a no-op.
    */
   async openPty(handle: ContainerHandle, opts: PtyOptions): Promise<PtySession> {
-    const child = spawn(this.bin, ["exec", `instance://${handle.id}`, "bash"], {
+    // --pwd /workspace: without it the shell starts in the instance's inherited
+    // HOST cwd (missing in-container), which apptainer "fixes" by falling back
+    // to /home/<user> — the web terminal then looks like the host machine.
+    const child = spawn(this.bin, ["exec", "--pwd", "/workspace", `instance://${handle.id}`, "bash"], {
       windowsHide: true,
     });
     void opts;
