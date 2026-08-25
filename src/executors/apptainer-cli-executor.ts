@@ -206,16 +206,12 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     const overlayPath = this.overlayPathFor(req.id);
     await rm(overlayPath, { recursive: true, force: true });
     await this.runHostUtil(["cp", "-a", "--sparse=always", snapshot.overlayPath, overlayPath]);
-    // env overrides must survive restore (LLM keys ride here)
+    // env overrides must survive restore (LLM keys ride here). NOTE: no --pwd
+    // here — this apptainer build rejects it on `instance start` (it is an
+    // exec-level flag); every exec/PTY invocation sets cwd itself.
     await this.runLifecycle([
       "instance", "start",
       ...ISOLATION_FLAGS,
-      // Fixed container-side cwd: without --pwd the instance inherits the
-      // platform process cwd (a HOST path that does not exist inside the
-      // container), so every subsequent `apptainer exec` prints
-      // "Error changing the container working directory" and falls back to
-      // /home/<user> — noisy and wrong for both bash tools and PTY shells.
-      "--pwd", "/workspace",
       ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       ...envArgs(req.env),
