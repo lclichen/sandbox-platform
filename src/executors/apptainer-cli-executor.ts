@@ -171,6 +171,21 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await rm(handle.overlayPath, { recursive: true, force: true });
   }
 
+  /** Spawn a HOST-side utility (cp etc.). runCli prefixes the apptainer
+   *  binary — system commands must bypass it. */
+  private async runHostUtil(argv: string[]): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(argv[0], argv.slice(1), { windowsHide: true });
+      let stderr = "";
+      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`${argv[0]} failed (exit ${code}): ${stderr.trim().slice(0, 300)}`));
+      });
+    });
+  }
+
   async snapshot(handle: ContainerHandle, name: string): Promise<SnapshotHandle> {
     const dst = `${this.snapshotBase}/${handle.id}-${name}`;
     await mkdir(dirname(dst), { recursive: true });
@@ -178,8 +193,8 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     // `cp -a --sparse=always`: Node's copyfile fills sparse holes, ballooning
     // an ext3-in-file overlay to its full logical size; --sparse=always keeps
     // the snapshot as thin as the source. -a covers directory overlays too.
-    const r = await this.runCli(["cp", "-a", "--sparse=always", handle.overlayPath, dst]);
-    if (r.exitCode !== 0) throw new Error(`snapshot copy failed (exit ${r.exitCode}): ${r.stderr.trim()}`);
+    // HOST cp — not runCli (which prefixes the apptainer binary).
+    await this.runHostUtil(["cp", "-a", "--sparse=always", handle.overlayPath, dst]);
     // P3-2: report the real copied size (mirrors ssh-executor.ts). du must run
     // on the HOST — `apptainer du` is an image-usage command with no -sb flags
     // and cannot measure a plain directory.
@@ -190,8 +205,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   async restore(snapshot: SnapshotHandle, req: CreateRequest): Promise<ContainerHandle> {
     const overlayPath = this.overlayPathFor(req.id);
     await rm(overlayPath, { recursive: true, force: true });
-    const r = await this.runCli(["cp", "-a", "--sparse=always", snapshot.overlayPath, overlayPath]);
-    if (r.exitCode !== 0) throw new Error(`restore copy failed (exit ${r.exitCode}): ${r.stderr.trim()}`);
+    await this.runHostUtil(["cp", "-a", "--sparse=always", snapshot.overlayPath, overlayPath]);
     // env overrides must survive restore (LLM keys ride here)
     await this.runLifecycle([
       "instance", "start",
