@@ -19,6 +19,7 @@ import { handleFromRow, type SandboxExecutor, type ContainerRowForExecutor } fro
 import { createContainerService } from "../services/container.service.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
+import { recordReaperReclaim } from "../middleware/metrics.ts";
 
 export interface ReaperSummary {
   scanned: number;
@@ -65,7 +66,11 @@ export function createReaper(db: Database, executor: SandboxExecutor): Reaper {
     return Math.max(parseDbUtc(session?.latest), parseDbUtc(row.last_started_at as string | null));
   }
 
-  /** DELETE operation_logs older than AUDIT_RETENTION_DAYS. Returns rows removed. */
+  /**
+   * Soft-purge operation_logs older than AUDIT_RETENTION_DAYS: SET purged_at
+   * instead of DELETE, so the SHA-256 hash chain stays reconstructable for
+   * forensic verification. Returns rows marked.
+   */
   async function purgeAuditLogs(): Promise<number> {
     const days = config.reaper.auditRetentionDays;
     if (!days || days <= 0) return 0;
@@ -73,8 +78,11 @@ export function createReaper(db: Database, executor: SandboxExecutor): Reaper {
     // sqlite stores "YYYY-MM-DD HH:MM:SS" (UTC); lexicographic compare needs the
     // same shape for the cutoff, otherwise the space-vs-T ordering skews the boundary.
     const bound = db.dialect === "sqlite" ? cutoff.replace("T", " ").replace(/\.\d{3}Z$/, "") : cutoff;
-    const result = await db.run("DELETE FROM operation_logs WHERE created_at < ?", bound as SqlValue);
-    if (result.changes > 0) logger.info({ removed: result.changes, days }, "reaper: purged old audit logs");
+    const result = await db.run(
+      "UPDATE operation_logs SET purged_at = CURRENT_TIMESTAMP WHERE created_at < ? AND purged_at IS NULL",
+      bound as SqlValue,
+    );
+    if (result.changes > 0) logger.info({ marked: result.changes, days }, "reaper: soft-purged old audit logs");
     return result.changes;
   }
 
@@ -122,6 +130,7 @@ export function createReaper(db: Database, executor: SandboxExecutor): Reaper {
     }
 
     summary.purgedAuditRows = await purgeAuditLogs();
+    if (summary.reclaimed.length > 0) recordReaperReclaim(summary.reclaimed.length);
     return summary;
   }
 

@@ -1,20 +1,26 @@
 /**
  * Auth routes: /api/v1/auth
  *
- *   POST /login        { username, password } -> { accessToken, refreshToken, expiresIn, user }
- *   POST /refresh      { refreshToken }        -> { accessToken, refreshToken, expiresIn }
- *   POST /logout       { refreshToken }        -> 204
- *   GET  /me                                  -> { user }                       (requires auth)
- *   GET  /dashboard                            -> current user's own summary     (requires auth)
+ *   POST  /login            { username, password } -> { accessToken, refreshToken, expiresIn, user }
+ *   POST  /refresh          { refreshToken }        -> { accessToken, refreshToken, expiresIn }
+ *   POST  /logout           { refreshToken }        -> 204
+ *   POST  /register         { username, password, email? } -> 201 (R1, REGISTER_MODE-gated)
+ *   GET   /config           public auth capabilities (register mode) for the login page
+ *   POST  /change-password  { currentPassword, newPassword } -> 204 (R9)
+ *   GET   /me                                      -> { user }                       (requires auth)
+ *   GET   /dashboard                                -> current user's own summary     (requires auth)
  */
 import { Router } from "express";
 import { z } from "zod";
 import { getDb } from "../app.ts";
+import { loadConfig } from "../config.ts";
 import { createAuthService } from "../services/auth.service.ts";
 import { createUserService, toPublic } from "../services/user.service.ts";
 import { createApiKeyService } from "../services/apikey.service.ts";
+import { validatePasswordPolicy } from "../auth/password.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
-import { loginSchema, refreshSchema, idParamSchema } from "./schemas/common.ts";
+import { BadRequestError } from "../utils/errors.ts";
+import { loginSchema, refreshSchema, registerSchema, changePasswordSchema, idParamSchema } from "./schemas/common.ts";
 import { validate } from "./validate.ts";
 
 export function authRouter(): Router {
@@ -26,6 +32,74 @@ export function authRouter(): Router {
     auth
       .login(body.username, body.password, req.ip)
       .then(({ user, ...pair }) => res.json({ ...pair, user: toPublic(user) }))
+      .catch(next);
+  });
+
+  // R1: public capability discovery — lets the login page render a register
+  // form only when the deployment actually allows self-registration.
+  router.get("/config", (_req, res) => {
+    const cfg = loadConfig();
+    res.json({ registerMode: cfg.register.mode });
+  });
+
+  // R1: self-registration. Behavior is driven by REGISTER_MODE:
+  //   off      -> 404 (identical to an unknown route; the endpoint "does not exist")
+  //   open     -> account created active with the default quota
+  //   approval -> account created pending; an admin approves via /admin/users
+  router.post("/register", (req, res, next) => {
+    const cfg = loadConfig();
+    if (cfg.register.mode === "off") {
+      // Deliberately indistinguishable from any other unknown route.
+      res.status(404).json({ code: "NOT_FOUND", message: "Resource not found" });
+      return;
+    }
+    let body: z.infer<typeof registerSchema>;
+    try {
+      body = validate(registerSchema, req.body);
+    } catch (err) {
+      next(err);
+      return;
+    }
+    const violation = validatePasswordPolicy(body.password);
+    if (violation) {
+      next(new BadRequestError(violation));
+      return;
+    }
+    (async () => {
+      const db = getDb(req);
+      // Resolve the quota template by name; a missing template degrades to the
+      // lowest-id quota row rather than failing the signup.
+      const quota = await db.get<{ id: number }>(
+        "SELECT id FROM resource_quotas WHERE name = ? ORDER BY id LIMIT 1",
+        cfg.register.defaultQuotaName,
+      );
+      const fallback = quota
+        ? undefined
+        : await db.get<{ id: number }>("SELECT id FROM resource_quotas ORDER BY id LIMIT 1");
+      const users = createUserService(db);
+      const created = await users.create({
+        username: body.username,
+        password: body.password,
+        email: body.email,
+        quota_id: quota?.id ?? fallback?.id,
+        status: cfg.register.mode === "approval" ? "pending" : "active",
+      });
+      res.status(201).json({
+        user: toPublic(created),
+        ...(cfg.register.mode === "approval"
+          ? { message: "Registration received. An administrator must approve the account before login." }
+          : {}),
+      });
+    })().catch(next);
+  });
+
+  // R9: self-service password change; also the exit path for accounts flagged
+  // must_change_password (the flag gates all other endpoints via requireAuth).
+  router.post("/change-password", requireAuth(), (req, res, next) => {
+    const body = validate(changePasswordSchema, req.body);
+    createAuthService(getDb(req))
+      .changePassword(currentUserId(req), body.currentPassword, body.newPassword)
+      .then(() => res.status(204).end())
       .catch(next);
   });
 
@@ -53,7 +127,7 @@ export function authRouter(): Router {
       .getById(currentUserId(req))
       .then((user) => {
         if (!user) {
-          res.status(404).json({ code: "not_found", message: "User not found" });
+          res.status(404).json({ code: "NOT_FOUND", message: "User not found" });
           return;
         }
         res.json({ user: toPublic(user) });

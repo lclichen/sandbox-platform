@@ -164,7 +164,7 @@ describe("reaper", () => {
     expect(row!.status).toBe("stopped");
   });
 
-  it("purges audit logs older than AUDIT_RETENTION_DAYS", async () => {
+  it("soft-purges audit logs older than AUDIT_RETENTION_DAYS (keeps the row for chain integrity)", async () => {
     process.env.AUDIT_RETENTION_DAYS = "1";
     resetConfigForTesting();
 
@@ -176,7 +176,13 @@ describe("reaper", () => {
     const summary = await createReaper(ctx.db, executor).tick();
     expect(summary.purgedAuditRows).toBe(1);
 
-    const remaining = await ctx.db.get<{ c: number }>("SELECT COUNT(*) AS c FROM operation_logs");
-    expect(Number(remaining!.c)).toBe(0);
+    // Soft-purge: the row is still present (chain stays reconstructable) but
+    // marked purged_at, so the admin log query hides it.
+    const stillThere = await ctx.db.get<{ c: number }>("SELECT COUNT(*) AS c FROM operation_logs");
+    expect(Number(stillThere!.c)).toBe(1);
+    const purged = await ctx.db.get<{ purged_at: string | null }>(
+      "SELECT purged_at FROM operation_logs WHERE action = 'test.old'",
+    );
+    expect(purged!.purged_at).not.toBeNull();
   });
 });

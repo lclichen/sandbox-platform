@@ -45,21 +45,26 @@ return a hint to build the UI.
 - **Access token tab**: paste a JWT (e.g. copied from a CLI login or the
   pi-sandbox-extension config); validated via `GET /api/v1/auth/me`.
 
-Tokens live in memory only (React context) and are **not** persisted to
-`localStorage`, so refreshing the page logs you out. On a 401 the client
-silently refreshes once using the cached refresh token; if that fails it
-redirects to the login screen.
+Tokens are persisted to `localStorage` so a page refresh keeps the session
+(see `src/auth/AuthContext.tsx`). This is a deliberate trade-off favoring UX
+over XSS hardening for an internal admin console; production deployments
+should add a strict CSP (the platform already sets one via Helmet). On a 401
+the client silently refreshes once using the cached refresh token; if that
+fails it clears the tokens and redirects to the login screen.
 
 ## Pages
 
 | Route | Purpose |
 |-------|---------|
 | `/` | Dashboard — counts, container-status breakdown, 30s auto-refresh |
-| `/users` | User CRUD, password reset, enable/disable, quota assignment |
-| `/quotas` | Resource quota tier CRUD |
+| `/users` | User CRUD, password reset, enable/disable, quota assignment (admin) |
+| `/quotas` | Resource quota tier CRUD (admin) |
 | `/images` | Base image catalogue CRUD (tags, default resources) |
 | `/containers` | All containers (admin view); start/stop/destroy; expandable snapshots with restore/delete |
+| `/workspaces` | Persistent per-user workspaces; file browser, upload/download, sync seed source |
 | `/logs` | Operation audit log with multi-field filters and pagination |
+| `/llm-admin` | LLM (LiteLLM) access bindings, budgets, model catalogue (admin) |
+| `/llm` | Personal LLM virtual keys: spend, reveal/revoke, direct endpoint (any user) |
 
 ## Tech
 

@@ -190,14 +190,20 @@ class PostgresDatabase implements Database {
   }
 
   async run(sql: string, ...params: SqlValue[]): Promise<QueryResult> {
-    const { text, values } = this.mapParams(sql, params);
+    const mapped = this.mapParams(sql, params);
     const client = await this.pool.connect();
     try {
-      const r = await client.query(text, values);
+      // No INSERT in the codebase used RETURNING, so callers reading
+      // lastInsertRowid got undefined -> NaN and every create flow broke on
+      // postgres. Append RETURNING id to plain INSERTs instead.
+      const isInsert = /^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s/i.test(mapped.text);
+      const text = isInsert && !/\bRETURNING\b/i.test(mapped.text)
+        ? `${mapped.text.trimEnd().replace(/;$/, "")} RETURNING id`
+        : mapped.text;
+      const r = await client.query(text, mapped.values);
       let lastInsertRowid: number | bigint | undefined;
       if (r.rows.length === 1 && r.rows[0]) {
         const row = r.rows[0] as Record<string, unknown>;
-        // Detect RETURNING id (convention: first column named id).
         const idVal = row.id ?? row.last_insert_rowid;
         if (idVal !== undefined) lastInsertRowid = Number(idVal);
       }

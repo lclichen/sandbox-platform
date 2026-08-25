@@ -20,6 +20,8 @@ import type {
   FileStat,
   ExecOptions,
   ExecResult,
+  PtyOptions,
+  PtySession,
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
@@ -97,13 +99,17 @@ export class MockExecutor implements SandboxExecutor {
       node: "mock-local",
       overlayPath: root,
       running: true,
+      env: req.env,
     };
     this.handles.set(handle.id, handle);
     logger.debug({ id: req.id, root }, "MockExecutor: container created");
     return handle;
   }
 
-  async start(handle: ContainerHandle): Promise<void> {
+  async start(handle: ContainerHandle, env?: Record<string, string>): Promise<void> {
+    // Apply any env overrides passed by the caller (e.g. re-applied on resume),
+    // else retain what was captured at create time.
+    if (env) handle.env = { ...(handle.env ?? {}), ...env };
     handle.running = true;
     this.handles.set(handle.id, handle);
   }
@@ -111,6 +117,10 @@ export class MockExecutor implements SandboxExecutor {
   async stop(handle: ContainerHandle): Promise<void> {
     handle.running = false;
     this.handles.set(handle.id, handle);
+  }
+
+  async removePath(path: string, _node?: string): Promise<void> {
+    await rm(path, { recursive: true, force: true });
   }
 
   async destroy(handle: ContainerHandle): Promise<void> {
@@ -134,6 +144,8 @@ export class MockExecutor implements SandboxExecutor {
       node: "mock-local",
       overlayPath: join(this.baseDir, req.id),
       running: true,
+      // env overrides must survive restore like the real executors
+      ...(req.env ? { env: req.env } : {}),
     };
     const root = this.root(handle);
     await rm(root, { recursive: true, force: true });
@@ -197,10 +209,16 @@ export class MockExecutor implements SandboxExecutor {
     const shellArgs = process.platform === "win32" && !shell.toLowerCase().includes("sh")
       ? ["/c", command]
       : ["-c", command];
+    // The handle passed in by tools.service is rebuilt from a DB row (no env);
+    // recover the create-time env from the internal map where the mock keeps
+    // the authoritative handle. Layer: process < stored handle env < per-cmd opts.
+    const stored = this.handles.get(handle.id);
+    const handleEnv = handle.env ?? stored?.env;
+    const mergedEnv = { ...process.env, ...(handleEnv ?? {}), ...(opts.env ?? {}) };
     return new Promise((resolveFn) => {
       const child = spawn(shell, shellArgs, {
         cwd,
-        env: { ...process.env, ...opts.env },
+        env: mergedEnv,
         windowsHide: true,
       });
       const stdoutChunks: Buffer[] = [];
@@ -308,6 +326,54 @@ export class MockExecutor implements SandboxExecutor {
       // ignore
     }
     return total;
+  }
+
+  /**
+   * Fake interactive terminal for tests / win32 development (R2). Echoes every
+   * input chunk back as output; the `exit` line ends the session with code 0.
+   * Resize is accepted but has no visual effect. This keeps the PTY WebSocket
+   * layer fully testable without a container runtime.
+   */
+  async openPty(_handle: ContainerHandle, opts: PtyOptions): Promise<PtySession> {
+    let dataCb: ((chunk: Buffer) => void) | undefined;
+    let exitCb: ((code: number | null) => void) | undefined;
+    let line = "";
+    let closed = false;
+    void opts;
+    return {
+      write(data: string) {
+        if (closed) return;
+        dataCb?.(Buffer.from(data));
+        for (const ch of data) {
+          if (ch === "\r" || ch === "\n") {
+            const cmd = line.trim();
+            line = "";
+            if (cmd === "exit") {
+              closed = true;
+              dataCb?.(Buffer.from("\r\n[pty exited]\r\n"));
+              exitCb?.(0);
+            }
+          } else {
+            line += ch;
+          }
+        }
+      },
+      resize(_cols: number, _rows: number) {
+        /* fake terminal: resize is a no-op */
+      },
+      kill() {
+        if (!closed) {
+          closed = true;
+          exitCb?.(1);
+        }
+      },
+      onData(cb) {
+        dataCb = cb;
+      },
+      onExit(cb) {
+        exitCb = cb;
+      },
+    };
   }
 }
 

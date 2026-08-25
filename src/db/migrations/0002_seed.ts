@@ -1,7 +1,11 @@
 /**
- * Seed default resource quota tiers and the bootstrap admin account.
+ * Seed default resource quota tiers, the bootstrap admin account, and sample
+ * images. Idempotent: only inserts when rows are absent, so re-running on an
+ * already-seeded DB is a no-op.
  *
- * Idempotent: only inserts when rows are absent.
+ * Folded from the original 0002_seed_defaults; the workspace-quota values that
+ * were applied via a separate UPDATE in the workspaces migration are now set
+ * directly on each tier.
  */
 import bcrypt from "bcrypt";
 import { loadConfig } from "../../config.ts";
@@ -17,6 +21,7 @@ const QUOTA_TIERS = [
     max_memory_mb: 2048,
     max_disk_gb: 10,
     max_snapshots_per_container: 5,
+    max_workspaces_per_user: 10,
   },
   {
     name: "admin",
@@ -26,6 +31,7 @@ const QUOTA_TIERS = [
     max_memory_mb: 16384,
     max_disk_gb: 50,
     max_snapshots_per_container: 20,
+    max_workspaces_per_user: 50,
   },
   {
     name: "enterprise",
@@ -35,6 +41,7 @@ const QUOTA_TIERS = [
     max_memory_mb: 32768,
     max_disk_gb: 100,
     max_snapshots_per_container: 50,
+    max_workspaces_per_user: 100,
   },
 ];
 
@@ -71,8 +78,8 @@ export const up: Migration["up"] = async ({ db }) => {
     if (!existing) {
       await db.run(
         `INSERT INTO resource_quotas
-          (name, description, max_containers, max_cpu_cores, max_memory_mb, max_disk_gb, max_snapshots_per_container)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          (name, description, max_containers, max_cpu_cores, max_memory_mb, max_disk_gb, max_snapshots_per_container, max_workspaces_per_user)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         tier.name,
         tier.description,
         tier.max_containers,
@@ -80,6 +87,7 @@ export const up: Migration["up"] = async ({ db }) => {
         tier.max_memory_mb,
         tier.max_disk_gb,
         tier.max_snapshots_per_container,
+        tier.max_workspaces_per_user,
       );
     }
   }
@@ -124,5 +132,5 @@ export const down: Migration["down"] = async ({ db }) => {
   // Keep quota tiers; they are reference data.
 };
 
-const migration: Migration = { id: "0002_seed_defaults", up, down };
+const migration: Migration = { id: "0002_seed", up, down };
 export default migration;

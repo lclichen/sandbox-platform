@@ -7,6 +7,7 @@ import { createDatabase, closeDatabase, type Database } from "../src/db/driver.t
 import { runMigrations } from "../src/db/migrate.ts";
 import { MockExecutor } from "../src/executors/mock-executor.ts";
 import { setExecutorForTesting, resetExecutorForTesting } from "../src/executors/factory.ts";
+import { resetConfigForTesting } from "../src/config.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,8 @@ export interface TestContext {
   tmpDir: string;
   /** Default admin credentials seeded by migrations. */
   admin: { username: string; password: string };
+  /** Restore WORKSPACE_BASE_DIR after teardown (set by setupTestApp). */
+  restoreWsBase: () => void;
 }
 
 export async function setupTestApp(): Promise<TestContext> {
@@ -36,6 +39,13 @@ export async function setupTestApp(): Promise<TestContext> {
   // Reset any cached singleton database/executor so the new instances take effect.
   await closeDatabase();
   resetExecutorForTesting();
+
+  // Point workspace storage at the temp dir so file operations never touch
+  // ./data/workspaces (stale files there leak between runs and break
+  // content-sensitive assertions like the R5 tree tests).
+  const prevWsBase = process.env.WORKSPACE_BASE_DIR;
+  process.env.WORKSPACE_BASE_DIR = join(tmpDir, "ws");
+  resetConfigForTesting();
 
   const db = await createDatabase({ sqlitePath: dbPath });
   await runMigrations(db);
@@ -53,6 +63,11 @@ export async function setupTestApp(): Promise<TestContext> {
     tmpDir,
     request: () => request(app),
     admin: { username: "admin", password: "changeme123" },
+    restoreWsBase: () => {
+      if (prevWsBase === undefined) delete process.env.WORKSPACE_BASE_DIR;
+      else process.env.WORKSPACE_BASE_DIR = prevWsBase;
+      resetConfigForTesting();
+    },
   };
 }
 
@@ -60,6 +75,7 @@ export async function teardownTestApp(ctx: TestContext): Promise<void> {
   await ctx.db.close();
   await closeDatabase();
   resetExecutorForTesting();
+  ctx.restoreWsBase();
   await rm(ctx.tmpDir, { recursive: true, force: true });
 }
 

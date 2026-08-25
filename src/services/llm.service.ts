@@ -102,10 +102,6 @@ function toKeyPublic(row: LlmVirtualKeyRow): LlmVirtualKeyPublic {
   return rest;
 }
 
-function toBindingPublic(row: LlmBindingRow, username: string): LlmBindingPublic {
-  return { ...row, username };
-}
-
 function litellmUserIdFor(platformUserId: number): string {
   return `litellm_user_${platformUserId}`;
 }
@@ -130,6 +126,15 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
    */
   function jsonParam(value: unknown): SqlValue {
     return encodeJson(value, dialect) as SqlValue;
+  }
+
+  /**
+   * Public projection of a binding. `models` is a JSON column (TEXT on sqlite,
+   * JSONB on pg); decode it to a JS array here so callers can `.join()` /
+   * iterate without hitting "models.join is not a function" on sqlite.
+   */
+  function toBindingPublic(row: LlmBindingRow, username: string): LlmBindingPublic {
+    return { ...row, username, models: decodeJson<string[]>(row.models, dialect) };
   }
 
   // ---------- admin: bindings ----------

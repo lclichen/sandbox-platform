@@ -33,7 +33,7 @@ describe("rate limiting", () => {
     }
     const blocked = await ctx.request().post("/api/v1/auth/login").send({ username: "admin", password: "wrong" });
     expect(blocked.status).toBe(429);
-    expect(blocked.body.code).toBe("rate_limited");
+    expect(blocked.body.code).toBe("RATE_LIMITED");
     // RateLimit headers per the IETF draft are present.
     expect(Number(blocked.headers["ratelimit-remaining"])).toBe(0);
   });

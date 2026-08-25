@@ -67,7 +67,7 @@ export function toolsRouter(): Router {
     const { id } = validate(idParamSchema, req.params);
     const path = String(req.query.path ?? "");
     if (!path) {
-      res.status(400).json({ code: "bad_request", message: "path is required" });
+      res.status(400).json({ code: "BAD_REQUEST", message: "path is required" });
       return;
     }
     createToolsService(getDb(req), getExecutorFromReq(req))
@@ -80,7 +80,7 @@ export function toolsRouter(): Router {
     const { id } = validate(idParamSchema, req.params);
     const path = String(req.query.path ?? "");
     if (!path) {
-      res.status(400).json({ code: "bad_request", message: "path is required" });
+      res.status(400).json({ code: "BAD_REQUEST", message: "path is required" });
       return;
     }
     createToolsService(getDb(req), getExecutorFromReq(req))
@@ -116,6 +116,8 @@ export function toolsRouter(): Router {
     const { command, cwd, timeout } = body;
 
     res.setHeader("Content-Type", "text/event-stream");
+    // nginx buffers SSE by default; batches events into visible delays.
+    res.setHeader("X-Accel-Buffering", "no");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();

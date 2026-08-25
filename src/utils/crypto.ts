@@ -33,7 +33,7 @@ export function isValidKeyHex(v: unknown): v is EncryptionKey {
  */
 export function encrypt(plaintext: string, keyHex: EncryptionKey): string {
   if (!isValidKeyHex(keyHex)) {
-    throw new HttpError(500, "llm_not_configured", "LLM_ENCRYPTION_KEY must be 64 hex chars (32 bytes).");
+    throw new HttpError(500, "LLM_NOT_CONFIGURED", "LLM_ENCRYPTION_KEY must be 64 hex chars (32 bytes).");
   }
   const key = Buffer.from(keyHex, "hex");
   const iv = randomBytes(IV_BYTES);
@@ -49,11 +49,11 @@ export function encrypt(plaintext: string, keyHex: EncryptionKey): string {
  */
 export function decrypt(payload: string, keyHex: EncryptionKey): string {
   if (!isValidKeyHex(keyHex)) {
-    throw new HttpError(500, "llm_not_configured", "LLM_ENCRYPTION_KEY must be 64 hex chars (32 bytes).");
+    throw new HttpError(500, "LLM_NOT_CONFIGURED", "LLM_ENCRYPTION_KEY must be 64 hex chars (32 bytes).");
   }
   const parts = payload.split(":");
   if (parts.length !== 3) {
-    throw new HttpError(500, "decrypt_failed", "Malformed ciphertext payload.");
+    throw new HttpError(500, "DECRYPT_FAILED", "Malformed ciphertext payload.");
   }
   const [ivB64, ctB64, tagB64] = parts;
   let iv: Buffer;
@@ -64,10 +64,10 @@ export function decrypt(payload: string, keyHex: EncryptionKey): string {
     ct = Buffer.from(ctB64, "base64");
     tag = Buffer.from(tagB64, "base64");
   } catch {
-    throw new HttpError(500, "decrypt_failed", "Ciphertext segments are not valid base64.");
+    throw new HttpError(500, "DECRYPT_FAILED", "Ciphertext segments are not valid base64.");
   }
   if (iv.length !== IV_BYTES || tag.length !== 16) {
-    throw new HttpError(500, "decrypt_failed", "IV or auth tag has unexpected length.");
+    throw new HttpError(500, "DECRYPT_FAILED", "IV or auth tag has unexpected length.");
   }
   const key = Buffer.from(keyHex, "hex");
   const decipher = createDecipheriv("aes-256-gcm", key, iv);
@@ -76,7 +76,7 @@ export function decrypt(payload: string, keyHex: EncryptionKey): string {
   try {
     plain = Buffer.concat([decipher.update(ct), decipher.final()]);
   } catch {
-    throw new HttpError(500, "decrypt_failed", "Authentication failed: wrong key or tampered ciphertext.");
+    throw new HttpError(500, "DECRYPT_FAILED", "Authentication failed: wrong key or tampered ciphertext.");
   }
   return plain.toString("utf8");
 }

@@ -41,7 +41,10 @@ describe("readiness + metrics (P2-2)", () => {
     expect(res.status).toBe(200);
     expect(res.headers["content-type"]).toContain("text/plain");
     expect(res.text).toContain("sandbox_http_requests_total");
-    expect(res.text).toContain('sandbox_containers_running 1');
+    // Container gauge is now by-status; the running container appears under its label.
+    expect(res.text).toContain('sandbox_containers_by_status{status="running"} 1');
+    expect(res.text).toContain("sandbox_users_total");
+    expect(res.text).toContain("sandbox_workspaces_total");
     expect(res.text).toContain("process_cpu_seconds_total");
   });
 });

@@ -56,7 +56,7 @@ export function llmAdminRouter(): Router {
     service(req)
       .getBinding(userId)
       .then((binding) => {
-        if (!binding) return res.status(404).json({ code: "not_found", message: `LLM binding for user ${userId} not found` });
+        if (!binding) return res.status(404).json({ code: "NOT_FOUND", message: `LLM binding for user ${userId} not found` });
         res.json({ binding });
       })
       .catch(next);

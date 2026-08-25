@@ -8,11 +8,23 @@ import { closeDatabase } from "./db/driver.ts";
 import { runMigrations } from "./db/migrate.ts";
 import { getExecutor } from "./executors/index.ts";
 import { createReaper } from "./scheduler/reaper.ts";
+import { attachPtyServer } from "./routes/pty.ts";
 import { logger } from "./utils/logger.ts";
 import { loadConfig, assertSecureProductionConfig } from "./config.ts";
 
 async function main() {
   const config = loadConfig();
+
+  // Process-level error capture: surface unhandled rejections / exceptions in
+  // the structured log before the process exits (Node's default is to exit on
+  // unhandledRejection since v15, but without a handler the diagnostic is lost).
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ reason: reason instanceof Error ? reason.stack : String(reason) }, "Unhandled promise rejection.");
+  });
+  process.on("uncaughtException", (err) => {
+    logger.error({ err: err.stack ?? err.message }, "Uncaught exception; exiting.");
+    process.exit(1);
+  });
 
   // Fail fast in production when known-insecure secrets are left in place
   // (public signing key / default admin password = instant compromise).
@@ -39,10 +51,15 @@ async function main() {
     logger.info({ host: config.host, port: config.port }, "Server listening.");
   });
 
+  // R2: interactive container terminals ride the same HTTP server
+  // (/api/v1/containers/:id/pty WebSocket upgrades).
+  const ptyServer = attachPtyServer(server, { db, executor: await getExecutor() });
+
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Shutting down...");
     reaper?.stop();
-    server.close();
+    ptyServer.close();
+    await new Promise<void>((resolveFn) => server.close(() => resolveFn()));
     await closeDatabase();
     process.exit(0);
   };

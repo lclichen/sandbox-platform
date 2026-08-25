@@ -33,6 +33,13 @@ export interface ContainerHandle {
   running: boolean;
   /** Base image SIF path (needed to rebuild `instance start` from a handle). */
   imagePath?: string;
+  /**
+   * Environment overrides captured at create time, so the MockExecutor (which
+   * runs a local process per exec) can re-apply them on each command without a
+   * separate store. SSH/CLI executors inject env into the apptainer instance at
+   * start and do not read this field.
+   */
+  env?: Record<string, string>;
 }
 
 export interface SnapshotHandle {
@@ -70,6 +77,11 @@ export interface CreateRequest {
    * When omitted, the container starts with an empty /workspace (image default).
    */
   seedFromPath?: string;
+  /**
+   * Writable-layer flavor: 'ext3' (default, pre-sized hard cap) or 'dir'
+   * (thin, unbounded — admin opt-in per image via images.overlay_kind).
+   */
+  overlayKind?: "ext3" | "dir";
 }
 
 export interface FileStat {
@@ -100,14 +112,37 @@ export interface ExecStream {
   kill(): void;
 }
 
+// ---- interactive PTY (R2: container terminal WebSocket) ----
+
+export interface PtyOptions {
+  cols: number;
+  rows: number;
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+/**
+ * A live interactive shell inside the container. Callbacks are set once via
+ * onData/onExit before any write; kill() tears the process down. The platform
+ * bridges this onto the /containers/:id/pty WebSocket.
+ */
+export interface PtySession {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
+  onData(cb: (chunk: Buffer) => void): void;
+  onExit(cb: (code: number | null) => void): void;
+}
+
 export interface SandboxExecutor {
   readonly kind: ExecutorKind;
   /** Probe whether the executor can operate (binary present, ssh reachable, ...). */
   isAvailable(): Promise<boolean>;
   /** Create + start an instance with a fresh overlay. */
   create(req: CreateRequest): Promise<ContainerHandle>;
-  /** Start a stopped instance (re-attach overlay). */
-  start(handle: ContainerHandle): Promise<void>;
+  // NOTE: a bare start(handle) was removed from the interface — it was never
+  // called (container.service rebuilds via create(), which carries the image
+  // path), and its overlay-as-image fallback could never boot.
   /** Stop a running instance gracefully (overlay retained). */
   stop(handle: ContainerHandle): Promise<void>;
   /** Destroy the instance AND its overlay (irreversible). */
@@ -116,6 +151,9 @@ export interface SandboxExecutor {
   snapshot(handle: ContainerHandle, name: string): Promise<SnapshotHandle>;
   /** Re-create an instance from a snapshot's overlay. */
   restore(snapshot: SnapshotHandle, req: CreateRequest): Promise<ContainerHandle>;
+  /** Delete an overlay/snapshot copy on the executor's filesystem (node-scoped
+   *  where applicable). Best-effort contract: resolve even when absent. */
+  removePath(path: string, node?: string): Promise<void>;
 
   // ---- file/command operations (relayed by the tools routes) ----
   readFile(handle: ContainerHandle, path: string): Promise<Buffer>;
@@ -124,6 +162,14 @@ export interface SandboxExecutor {
   readdir(handle: ContainerHandle, path: string): Promise<string[]>;
   stat(handle: ContainerHandle, path: string): Promise<FileStat>;
   exec(handle: ContainerHandle, command: string, opts?: ExecOptions): Promise<ExecResult>;
+  /** Binary-safe exec (stdout as raw Buffer). Optional: executors that only
+   *  produce utf8 output (SSH) may omit it; callers must fall back or reject. */
+  execBuffer?(handle: ContainerHandle, command: string): Promise<Buffer>;
+
+  // ---- interactive terminal (R2). Optional so an executor can decline
+  // (callers must treat "absent" as "terminal unsupported"); MockExecutor
+  // provides an echo shell so the WS layer is testable on win32. ----
+  openPty?(handle: ContainerHandle, opts: PtyOptions): Promise<PtySession>;
 }
 
 /**

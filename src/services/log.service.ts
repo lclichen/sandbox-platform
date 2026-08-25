@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import type { Database, SqlValue } from "../db/driver.ts";
 import { encodeJson } from "../db/driver.ts";
+import { logger } from "../utils/logger.ts";
 
 export interface LogRow {
   id: number;
@@ -64,7 +65,7 @@ export function createLogService(db: Database) {
           entry.errorMessage ?? null,
         ]);
         const last = await db.get<{ hash: string | null }>(
-          "SELECT hash FROM operation_logs WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1",
+          "SELECT hash FROM operation_logs WHERE hash IS NOT NULL AND purged_at IS NULL ORDER BY id DESC LIMIT 1",
         );
         const prev = last?.hash ?? "";
         const hash = createHash("sha256").update(`${prev}${canonical}`).digest("hex");
@@ -86,13 +87,12 @@ export function createLogService(db: Database) {
         );
       } catch (err) {
         // Never let audit failure break the request.
-        // eslint-disable-next-line no-console
-        console.warn("operation_logs write failed:", err);
+        logger.warn({ err }, "operation_logs write failed (request continues)");
       }
     },
 
     async list(query: LogQuery): Promise<{ logs: LogRow[]; total: number }> {
-      const where: string[] = [];
+      const where: string[] = ["purged_at IS NULL"];
       const params: SqlValue[] = [];
       if (query.userId !== undefined) {
         where.push("user_id = ?");

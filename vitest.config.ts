@@ -10,6 +10,9 @@ export default defineConfig({
     server: { deps: { external: [/^node:/, /^better-sqlite3$/] } },
     hookTimeout: 30000,
     testTimeout: 30000,
+    // Lifecycle tests use the mock executor against the SEEDED demo images —
+    // migration 0004 removes them in real deployments, keep them for tests.
+    env: { SEED_DEMO_IMAGES: "on" },
     pool: "forks",
     singleFork: true, // node:sqlite + WAL plays safest single-process
   },

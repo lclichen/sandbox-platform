@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api/client";
-import type { QuotaRow } from "../api/types";
+import type { ImageRow, QuotaRow } from "../api/types";
 import { Modal, ModalActions } from "../components/Modal";
 import { ConfirmButton } from "../components/ConfirmDialog";
 
@@ -13,6 +13,7 @@ const EMPTY: Omit<QuotaRow, "id" | "created_at" | "updated_at"> = {
   max_disk_gb: 10,
   max_snapshots_per_container: 5,
   max_workspaces_per_user: 10,
+  allowed_image_ids: null,
 };
 
 export function Quotas() {
@@ -51,6 +52,7 @@ export function Quotas() {
         max_disk_gb: q.max_disk_gb,
         max_snapshots_per_container: q.max_snapshots_per_container,
         max_workspaces_per_user: q.max_workspaces_per_user,
+        allowed_image_ids: q.allowed_image_ids,
       },
     });
 
@@ -76,13 +78,14 @@ export function Quotas() {
               <th>Disk</th>
               <th>Snapshots/container</th>
               <th>Workspaces/user</th>
+              <th>Image whitelist</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} className="center-msg">
+                <td colSpan={9} className="center-msg">
                   Loading…
                 </td>
               </tr>
@@ -96,6 +99,7 @@ export function Quotas() {
                   <td>{q.max_disk_gb} GB</td>
                   <td>{q.max_snapshots_per_container}</td>
                   <td>{q.max_workspaces_per_user}</td>
+                  <td className="muted">{q.allowed_image_ids ? `${q.allowed_image_ids.length} images` : "all public"}</td>
                   <td className="actions">
                     <button className="small" onClick={() => startEdit(q)}>
                       Edit
@@ -143,11 +147,27 @@ function QuotaModal({
   onSaved: () => void;
 }) {
   const [draft, setDraft] = useState({ ...initial });
+  const [images, setImages] = useState<ImageRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    api
+      .listImages()
+      .then((res) => setImages(res.images))
+      .catch(() => setImages([]));
+  }, []);
+
   const setNum = (key: keyof typeof draft) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setDraft({ ...draft, [key]: Number(e.target.value) || 0 });
+
+  // R6: toggle an image id in the whitelist; unchecking everything except a
+  // non-empty selection keeps null = "all public images".
+  const toggleImage = (id: number, checked: boolean) => {
+    const current = draft.allowed_image_ids ?? [];
+    const next = checked ? [...current, id] : current.filter((x) => x !== id);
+    setDraft({ ...draft, allowed_image_ids: next.length > 0 ? next : null });
+  };
 
   const submit = async () => {
     setBusy(true);
@@ -222,6 +242,28 @@ function QuotaModal({
           value={draft.max_workspaces_per_user}
           onChange={setNum("max_workspaces_per_user")}
         />
+      </div>
+      <div className="form-field">
+        <label>
+          Allowed images (R6) — none checked = all public images; users on this quota can only create
+          containers from checked images
+        </label>
+        <div style={{ maxHeight: 140, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 6, padding: 8 }}>
+          {images.length === 0 ? (
+            <span className="muted">No images defined.</span>
+          ) : (
+            images.map((img) => (
+              <label key={img.id} style={{ display: "flex", gap: 6, alignItems: "center", fontWeight: 400 }}>
+                <input
+                  type="checkbox"
+                  checked={(draft.allowed_image_ids ?? []).includes(img.id)}
+                  onChange={(e) => toggleImage(img.id, e.target.checked)}
+                />
+                {img.display_name} <span className="muted">({img.name})</span>
+              </label>
+            ))
+          )}
+        </div>
       </div>
       {error && <div className="error-banner">{error}</div>}
       <ModalActions>

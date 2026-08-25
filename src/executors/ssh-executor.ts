@@ -19,6 +19,7 @@
  * unavailable so the factory falls back.
  */
 import { NodeSSH } from "node-ssh";
+import type { ClientChannel } from "ssh2";
 import type {
   SandboxExecutor,
   ExecutorKind,
@@ -28,9 +29,12 @@ import type {
   FileStat,
   ExecOptions,
   ExecResult,
+  PtyOptions,
+  PtySession,
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
+import { isValidEnvName } from "./shell-quote.ts";
 
 export class SshExecutor implements SandboxExecutor {
   readonly kind: ExecutorKind = "ssh";
@@ -41,6 +45,9 @@ export class SshExecutor implements SandboxExecutor {
   private readonly privateKeyPath?: string;
   private readonly password?: string;
   private readonly resourceLimits: boolean;
+  /** Remote-side base dirs (config-driven, was hardcoded /srv/apptainer/...). */
+  private readonly overlayBaseDir: string;
+  private readonly seedBaseDir: string;
 
   constructor() {
     const config = loadConfig();
@@ -51,6 +58,8 @@ export class SshExecutor implements SandboxExecutor {
     this.privateKeyPath = config.executor.ssh.privateKeyPath;
     this.password = config.executor.ssh.password;
     this.resourceLimits = config.executor.apptainer.resourceLimits;
+    this.overlayBaseDir = config.executor.ssh.overlayBaseDir;
+    this.seedBaseDir = config.executor.ssh.seedBaseDir;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -64,8 +73,12 @@ export class SshExecutor implements SandboxExecutor {
     }
   }
 
+  private connectedHost: string | undefined;
+
   private async connect(host: string): Promise<void> {
-    if (this.ssh.isConnected()) return;
+    // isConnected() alone is not enough: with node overrides the same client
+    // could silently run commands on the WRONG node. Reconnect on host change.
+    if (this.ssh.isConnected() && this.connectedHost === host) return;
     await this.ssh.connect({
       host,
       port: this.port,
@@ -73,6 +86,7 @@ export class SshExecutor implements SandboxExecutor {
       ...(this.privateKeyPath ? { privateKeyPath: this.privateKeyPath } : {}),
       ...(this.password ? { password: this.password } : {}),
     });
+    this.connectedHost = host;
   }
 
   private async execRemote(command: string): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -83,7 +97,7 @@ export class SshExecutor implements SandboxExecutor {
   async create(req: CreateRequest): Promise<ContainerHandle> {
     const host = req.node ?? this.defaultHost!;
     await this.connect(host);
-    const overlayPath = req.overlayPath ?? `/srv/apptainer/overlays/${req.id}.ext3`;
+    const overlayPath = req.overlayPath ?? `${this.overlayBaseDir}/${req.id}.ext3`;
     // P1-6: enforce the disk ceiling at the overlay layer (sparse ext3 image of
     // diskGb*1024 MiB, manual §2.2); falls back to a directory overlay.
     await this.ensureOverlay(overlayPath, req.diskGb);
@@ -93,13 +107,22 @@ export class SshExecutor implements SandboxExecutor {
     // is unique per instance so concurrent creates do not collide.
     let bindOpt = "";
     if (req.seedFromPath) {
-      const remoteSeed = `/srv/apptainer/workspace-seeds/${req.id}`;
+      const remoteSeed = `${this.seedBaseDir}/${req.id}`;
       await this.execRemote(`rm -rf ${shellQuote(remoteSeed)} && mkdir -p ${shellQuote(remoteSeed)}`);
       await this.ssh.putDirectory(req.seedFromPath, remoteSeed, { recursive: true });
       bindOpt = `--bind ${shellQuote(remoteSeed)}:/workspace`;
     }
 
-    await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb, bindOpt);
+    await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb, bindOpt, req.env);
+    // --contain drops default binds; ensure /workspace exists (bash cwd target).
+    // Idempotent; skipped when a seed is bind-mounted (bind already provides it).
+    if (!req.seedFromPath) {
+      try {
+        await this.execRemote(`apptainer exec instance://${shellQuote(req.id)} mkdir -p /workspace`);
+      } catch {
+        // best-effort
+      }
+    }
     return { id: req.id, node: host, overlayPath, running: true, imagePath: req.imagePath };
   }
 
@@ -128,7 +151,9 @@ export class SshExecutor implements SandboxExecutor {
 
   /**
    * P1-7: run instances with host isolation (no hostfs / no cwd mount) so the
-   * guest cannot see or write the SSH user's host filesystem.
+   * guest cannot see or write the SSH user's host filesystem. Lifecycle
+   * command: a non-zero exit THROWS — a resolved failure used to mark the
+   * container row running with no live instance.
    */
   private async startInstance(
     overlayPath: string,
@@ -137,32 +162,31 @@ export class SshExecutor implements SandboxExecutor {
     cpu?: number,
     memoryMb?: number,
     extraOpts = "",
+    env?: Record<string, string>,
   ): Promise<void> {
     // Resource limits need cgroup support; only apply when enabled (default
     // OFF: rootless + cgroup-v1 hosts fail instance start with "rootless
     // cgroups requires cgroups v2").
     const cpuOpt = this.resourceLimits && cpu ? `--cpus ${cpu}` : "";
     const memOpt = this.resourceLimits && memoryMb ? `--memory ${memoryMb}M` : "";
-    await this.execRemote(
-      `apptainer instance start --contain --no-mount hostfs,cwd ${cpuOpt} ${memOpt} --overlay ${shellQuote(overlayPath)} ${extraOpts} ${shellQuote(imagePath)} ${shellQuote(id)}`,
+    const envOpt = envOpts(env);
+    const r = await this.execRemote(
+      `apptainer instance start --contain --no-mount hostfs,cwd ${cpuOpt} ${memOpt} ${envOpt} --overlay ${shellQuote(overlayPath)} ${extraOpts} ${shellQuote(imagePath)} ${shellQuote(id)}`,
     );
-  }
-
-  async start(handle: ContainerHandle): Promise<void> {
-    await this.connect(handle.node);
-    // The handle carries the image path so a resume rebuilds a valid start
-    // command; fall back to the overlay path as the image for legacy handles.
-    const imageArg = handle.imagePath ? shellQuote(handle.imagePath) : shellQuote(handle.overlayPath);
-    await this.execRemote(
-      `apptainer instance start --contain --no-mount hostfs,cwd --overlay ${shellQuote(handle.overlayPath)} ${imageArg} ${shellQuote(handle.id)}`,
-    );
-    handle.running = true;
+    if (r.code !== 0) {
+      throw new Error(`apptainer instance start 失败 (exit ${r.code}): ${r.stderr.trim().slice(0, 500)}`);
+    }
   }
 
   async stop(handle: ContainerHandle): Promise<void> {
     await this.connect(handle.node);
     await this.execRemote(`apptainer instance stop ${shellQuote(handle.id)}`);
     handle.running = false;
+  }
+
+  async removePath(path: string, node?: string): Promise<void> {
+    await this.connect(node ?? this.defaultHost!);
+    await this.execRemote(`rm -rf ${shellQuote(path)} 2>/dev/null || true`);
   }
 
   async destroy(handle: ContainerHandle): Promise<void> {
@@ -187,10 +211,14 @@ export class SshExecutor implements SandboxExecutor {
   async restore(snapshot: SnapshotHandle, req: CreateRequest): Promise<ContainerHandle> {
     const host = req.node ?? this.defaultHost!;
     await this.connect(host);
-    const overlayPath = req.overlayPath ?? `/srv/apptainer/overlays/${req.id}.ext3`;
-    await this.execRemote(`rm -rf ${shellQuote(overlayPath)}; cp -a --sparse=always ${shellQuote(snapshot.overlayPath)} ${shellQuote(overlayPath)}`);
-    await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb);
-    return { id: req.id, node: host, overlayPath, running: true, imagePath: req.imagePath };
+    const overlayPath = req.overlayPath ?? `${this.overlayBaseDir}/${req.id}.ext3`;
+    const copy = await this.execRemote(
+      `rm -rf ${shellQuote(overlayPath)}; cp -a --sparse=always ${shellQuote(snapshot.overlayPath)} ${shellQuote(overlayPath)}`,
+    );
+    if (copy.code !== 0) throw new Error(`snapshot copy failed (exit ${copy.code}): ${copy.stderr.trim().slice(0, 300)}`);
+    // env overrides must survive restore (LLM keys ride here)
+    await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb, "", req.env);
+    return { id: req.id, node: host, overlayPath, running: true, imagePath: req.imagePath, env: req.env };
   }
 
   async readFile(handle: ContainerHandle, path: string): Promise<Buffer> {
@@ -206,9 +234,15 @@ export class SshExecutor implements SandboxExecutor {
     await this.connect(handle.node);
     const b64 = content.toString("base64");
     const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".";
-    await this.execRemote(
-      `apptainer exec instance://${shellQuote(handle.id)} sh -c 'mkdir -p ${shellQuote(parent)} && echo ${shellQuote(b64)} | base64 -d > ${shellQuote(path)}'`,
+    // SECURITY: the inner command must be passed as ONE shell-quoted argument.
+    // The previous form embedded shellQuote() output inside an outer
+    // single-quoted string, so a path containing ' broke out of quoting and
+    // executed on the SSH HOST as this user.
+    const inner = `mkdir -p ${shellQuote(parent)} && echo ${shellQuote(b64)} | base64 -d > ${shellQuote(path)}`;
+    const r = await this.execRemote(
+      `apptainer exec instance://${shellQuote(handle.id)} sh -c ${shellQuote(inner)}`,
     );
+    if (r.code !== 0) throw new Error(`writeFile failed (exit ${r.code}): ${path}`);
   }
 
   async access(handle: ContainerHandle, path: string): Promise<void> {
@@ -243,17 +277,105 @@ export class SshExecutor implements SandboxExecutor {
     await this.connect(handle.node);
     const cwdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
     const wrapped = `apptainer exec instance://${shellQuote(handle.id)} sh -c ${shellQuote(cwdPrefix + command)}`;
-    // node-ssh execCommand is non-streaming at this layer; collect buffers.
-    const result = await this.ssh.execCommand(wrapped, { execOptions: opts.timeout ? { timeout: opts.timeout * 1000 } as never : undefined });
+    // node-ssh's execOptions.timeout kills the process but doesn't surface a
+    // distinct "timed out" signal (result.code is typically null afterward).
+    // Track the deadline ourselves so callers get an accurate timedOut flag,
+    // matching the mock + apptainer-cli executors.
+    const timeoutMs = opts.timeout ? opts.timeout * 1000 : undefined;
+    const deadline = timeoutMs ? Date.now() + timeoutMs : undefined;
+    let timedOut = false;
+    const onTimeout = () => {
+      timedOut = true;
+    };
+    const timer = deadline ? setTimeout(onTimeout, timeoutMs!) : undefined;
+    if (timer) timer.unref?.();
+    try {
+      const result = await this.ssh.execCommand(wrapped, {
+        execOptions: opts.timeout ? { timeout: opts.timeout * 1000 } as never : undefined,
+      });
+      // If our own deadline fired (or has passed by the time execCommand
+      // returned), treat it as a timeout regardless of node-ssh's signal.
+      if (deadline && (timedOut || Date.now() >= deadline)) timedOut = true;
+      return {
+        exitCode: result.code ?? -1,
+        stdout: result.stdout ?? "",
+        stderr: result.stderr ?? "",
+        timedOut,
+      };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Interactive container terminal (R2): an SSH exec channel with a pty
+   * allocated, running `apptainer exec instance://<id> bash`. The shared SSH
+   * connection stays open — only the channel ends when the shell exits.
+   */
+  async openPty(handle: ContainerHandle, opts: PtyOptions): Promise<PtySession> {
+    await this.connect(handle.node);
+    const client = this.ssh.connection;
+    if (!client) throw new Error("SSH connection not established");
+    const command = `apptainer exec instance://${shellQuote(handle.id)} bash`;
+    const channel = await new Promise<ClientChannel>((resolve, reject) => {
+      client.exec(
+        command,
+        { pty: { term: "xterm", cols: opts.cols, rows: opts.rows } } as never,
+        (err: Error | undefined, stream: ClientChannel) => {
+          if (err) reject(err);
+          else resolve(stream);
+        },
+      );
+    });
+    let exited = false;
     return {
-      exitCode: result.code ?? -1,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? "",
-      timedOut: false,
+      write(data: string) {
+        channel.write(data);
+      },
+      resize(cols: number, rows: number) {
+        channel.setWindow(rows, cols, 480, 640);
+      },
+      kill() {
+        if (!exited) {
+          exited = true;
+          channel.close();
+        }
+      },
+      onData(cb) {
+        channel.stdout.on("data", (d: Buffer) => cb(d));
+        channel.stderr.on("data", (d: Buffer) => cb(d));
+      },
+      onExit(cb) {
+        channel.on("exit", (code: number | null) => {
+          exited = true;
+          cb(code);
+        });
+        channel.on("close", () => {
+          if (!exited) {
+            exited = true;
+            cb(null);
+          }
+        });
+      },
     };
   }
 }
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Render `--env KEY=VALUE` flags for apptainer instance start. The KEY is
+ * constrained to a conservative charset (letters/digits/_/.) and VALUE is
+ * shell-quoted so injection via a value is not possible. Returns "" when empty.
+ */
+export function envOpts(env?: Record<string, string>): string {
+  if (!env) return "";
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (!isValidEnvName(k)) continue; // skip malformed names
+    parts.push(`--env ${k}=${shellQuote(String(v))}`);
+  }
+  return parts.join(" ");
 }

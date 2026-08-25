@@ -22,8 +22,9 @@
  * in-memory, scoped per user).
  */
 import { Router, type Request } from "express";
-import { getDb, getExecutorFromReq } from "../app.ts";
+import { getDb, getExecutorFromReq, getLlmEnvProvider } from "../app.ts";
 import { createContainerService } from "../services/container.service.ts";
+import { createWorkspaceService } from "../services/workspace.service.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
 import { UnauthorizedError } from "../utils/errors.ts";
 import {
@@ -75,7 +76,7 @@ export function containersRouter(): Router {
         return;
       }
     }
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .create(currentUserId(req), body)
       .then((row) => {
@@ -91,8 +92,12 @@ export function containersRouter(): Router {
 
   router.get("/", (req, res, next) => {
     const query = validate(listContainersSchema, req.query);
+    // R6: `filter` is a friendly alias for status (running|stopped|all).
+    if (!query.status && query.filter && query.filter !== "all") {
+      query.status = query.filter;
+    }
     const a = actor(req);
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .list(currentUserId(req), query)
       .then((rows) => res.json({ containers: rows.map((r) => svc._toPublic(r, a.isAdmin)) }))
@@ -102,7 +107,7 @@ export function containersRouter(): Router {
   router.get("/:id", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const a = actor(req);
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .requireOwned(id, a.id, a.isAdmin)
       .then((row) => res.json(svc._toPublic(row, a.isAdmin)))
@@ -112,7 +117,7 @@ export function containersRouter(): Router {
   router.post("/:id/start", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const a = actor(req);
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .start(id, a.id, a.isAdmin)
       .then((row) => res.json(svc._toPublic(row, a.isAdmin)))
@@ -122,7 +127,7 @@ export function containersRouter(): Router {
   router.post("/:id/stop", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const a = actor(req);
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .stop(id, a.id, a.isAdmin)
       .then((row) => res.json(svc._toPublic(row, a.isAdmin)))
@@ -132,7 +137,7 @@ export function containersRouter(): Router {
   router.delete("/:id", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const a = actor(req);
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .destroy(id, a.id, a.isAdmin)
       .then(() => res.status(204).end())
@@ -143,7 +148,7 @@ export function containersRouter(): Router {
     const { id } = validate(idParamSchema, req.params);
     const body = validate(createSnapshotSchema, req.body);
     const a = actor(req);
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .snapshot(id, a.id, body.name, body.description, a.isAdmin)
       .then((snap) => res.status(201).json(snap))
@@ -153,7 +158,7 @@ export function containersRouter(): Router {
   router.get("/:id/snapshots", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const a = actor(req);
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .listSnapshots(id, a.id, a.isAdmin)
       .then((rows) => res.json({ snapshots: rows }))
@@ -163,11 +168,11 @@ export function containersRouter(): Router {
   router.post("/:id/snapshots/:sid/restore", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const sid = Number.parseInt(req.params.sid, 10);
-    if (Number.isNaN(sid)) {
-      res.status(400).json({ code: "bad_request", message: "Invalid snapshot id" });
+    if (!Number.isInteger(sid) || sid <= 0) {
+      res.status(400).json({ code: "BAD_REQUEST", message: "Invalid snapshot id" });
       return;
     }
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .restoreSnapshot(id, sid, actor(req).id, actor(req).isAdmin)
       .then((row) => res.json(svc._toPublic(row, actor(req).isAdmin)))
@@ -177,21 +182,40 @@ export function containersRouter(): Router {
   router.delete("/:id/snapshots/:sid", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const sid = Number.parseInt(req.params.sid, 10);
-    if (Number.isNaN(sid)) {
-      res.status(400).json({ code: "bad_request", message: "Invalid snapshot id" });
+    if (!Number.isInteger(sid) || sid <= 0) {
+      res.status(400).json({ code: "BAD_REQUEST", message: "Invalid snapshot id" });
       return;
     }
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .deleteSnapshot(id, sid, actor(req).id, actor(req).isAdmin)
       .then(() => res.status(204).end())
       .catch(next);
   });
 
+  // Archive the container's /workspace into one of the user's cloud
+  // workspaces as a .tar.gz (one-way export; create-time seeding is the
+  // reverse direction).
+  router.post("/:id/export-workspace", (req, res, next) => {
+    const { id } = validate(idParamSchema, req.params);
+    const workspaceId = Number(req.body?.workspaceId);
+    if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
+      res.status(400).json({ code: "BAD_REQUEST", message: "workspaceId (positive integer) is required" });
+      return;
+    }
+    const a = actor(req);
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const wsSvc = createWorkspaceService(getDb(req));
+    svc
+      .exportWorkspaceToUserWorkspace(id, a.id, workspaceId, a.isAdmin, wsSvc)
+      .then((result) => res.status(201).json(result))
+      .catch(next);
+  });
+
   router.get("/:id/connect", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const a = actor(req);
-    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .resolveRunningHandle(id, a.id, a.isAdmin)
       .then(async ({ row, handle }) => {
