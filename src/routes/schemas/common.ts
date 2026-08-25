@@ -96,6 +96,7 @@ export const createImageSchema = z.object({
   description: z.string().max(2048).optional(),
   is_public: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
+  overlay_kind: z.enum(["ext3", "dir"]).optional(),
   default_resources: z
     .object({
       cpu: z.number().int().min(1).max(1024),

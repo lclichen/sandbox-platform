@@ -27,6 +27,7 @@ const migrationModules: Array<{ id: string; module: string }> = [
   { id: "0002_seed", module: "./migrations/0002_seed.ts" },
   { id: "0003_pi_web_integration", module: "./migrations/0003_pi_web_integration.ts" },
   { id: "0004_remove_demo_images", module: "./migrations/0004_remove_demo_images.ts" },
+  { id: "0005_snapshot_decouple", module: "./migrations/0005_snapshot_decouple.ts" },
 ];
 
 async function ensureSchemaMigrationsTable(db: Database): Promise<void> {

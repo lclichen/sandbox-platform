@@ -79,7 +79,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     const overlayPath = this.overlayPathFor(req.id);
     // P1-6: bounded ext3 overlay when possible (manual §2.2); fall back to a
     // directory overlay if `apptainer overlay create` is unavailable.
-    await this.ensureOverlay(overlayPath, req.diskGb);
+    await this.ensureOverlay(overlayPath, req.diskGb, req.overlayKind);
     // Seed the overlay's /workspace from a host-side workspace directory. The
     // overlay is a directory this executor manages locally, so a plain cp lands
     // the files where the container will see them mounted.
@@ -123,19 +123,21 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     }
   }
 
-  /** Create a sparse ext3 overlay sized to diskGb (MiB); fall back to a dir. */
-  private async ensureOverlay(overlayPath: string, diskGb: number): Promise<void> {
+  /** Create a sparse ext3 overlay sized to diskGb (MiB); fall back to a dir.
+   *  overlayKind 'dir' skips the ext3 image entirely: a directory overlay is
+   *  thin by nature (no hard cap) — admin opt-in per image. */
+  private async ensureOverlay(overlayPath: string, diskGb: number, overlayKind?: "ext3" | "dir"): Promise<void> {
     try {
       await stat(overlayPath);
       return; // exists
     } catch {
       // missing — create below
     }
-    // apptainer overlay create writes a .ext3 file via dd but does NOT create
-    // the parent directory; ensure it exists first or dd fails with
-    // "No such file or directory" and we silently fall back to an unbounded dir.
     await mkdir(dirname(overlayPath), { recursive: true });
-    if (diskGb > 0) {
+    if (overlayKind !== "dir" && diskGb > 0) {
+      // apptainer overlay create writes a .ext3 file via dd but does NOT create
+      // the parent directory; ensure it exists first or dd fails with
+      // "No such file or directory" and we silently fall back to an unbounded dir.
       const sizeMiB = Math.max(1, Math.round(diskGb * 1024));
       const created = await this.runCli(["overlay", "create", "--size", String(sizeMiB), overlayPath]);
       if (created.exitCode === 0) return;
@@ -173,7 +175,11 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     const dst = `${this.snapshotBase}/${handle.id}-${name}`;
     await mkdir(dirname(dst), { recursive: true });
     await rm(dst, { recursive: true, force: true });
-    await cp(handle.overlayPath, dst, { recursive: true });
+    // `cp -a --sparse=always`: Node's copyfile fills sparse holes, ballooning
+    // an ext3-in-file overlay to its full logical size; --sparse=always keeps
+    // the snapshot as thin as the source. -a covers directory overlays too.
+    const r = await this.runCli(["cp", "-a", "--sparse=always", handle.overlayPath, dst]);
+    if (r.exitCode !== 0) throw new Error(`snapshot copy failed (exit ${r.exitCode}): ${r.stderr.trim()}`);
     // P3-2: report the real copied size (mirrors ssh-executor.ts). du must run
     // on the HOST — `apptainer du` is an image-usage command with no -sb flags
     // and cannot measure a plain directory.
@@ -184,7 +190,8 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   async restore(snapshot: SnapshotHandle, req: CreateRequest): Promise<ContainerHandle> {
     const overlayPath = this.overlayPathFor(req.id);
     await rm(overlayPath, { recursive: true, force: true });
-    await cp(snapshot.overlayPath, overlayPath, { recursive: true });
+    const r = await this.runCli(["cp", "-a", "--sparse=always", snapshot.overlayPath, overlayPath]);
+    if (r.exitCode !== 0) throw new Error(`restore copy failed (exit ${r.exitCode}): ${r.stderr.trim()}`);
     // env overrides must survive restore (LLM keys ride here)
     await this.runLifecycle([
       "instance", "start",
@@ -265,6 +272,24 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     const cwdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
     const args = ["exec", "--pwd", "/workspace", `instance://${handle.id}`, "sh", "-c", cwdPrefix + command];
     return this.runCli(args, opts);
+  }
+
+  /** Run a command and capture stdout as raw BYTES (utf8 decoding would
+   *  corrupt archives/binary payloads — used by workspace export). */
+  async execBuffer(handle: ContainerHandle, command: string): Promise<Buffer> {
+    const args = ["exec", "--pwd", "/workspace", `instance://${handle.id}`, "sh", "-c", command];
+    return new Promise<Buffer>((resolve, reject) => {
+      const child = spawn(this.bin, args, { windowsHide: true });
+      const chunks: Buffer[] = [];
+      let stderr = "";
+      child.stdout.on("data", (d: Buffer) => chunks.push(d));
+      child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) resolve(Buffer.concat(chunks));
+        else reject(new Error(`execBuffer failed (exit ${code}): ${stderr.trim().slice(0, 300)}`));
+      });
+    });
   }
 
   /**

@@ -77,6 +77,11 @@ export interface CreateRequest {
    * When omitted, the container starts with an empty /workspace (image default).
    */
   seedFromPath?: string;
+  /**
+   * Writable-layer flavor: 'ext3' (default, pre-sized hard cap) or 'dir'
+   * (thin, unbounded — admin opt-in per image via images.overlay_kind).
+   */
+  overlayKind?: "ext3" | "dir";
 }
 
 export interface FileStat {
@@ -157,6 +162,9 @@ export interface SandboxExecutor {
   readdir(handle: ContainerHandle, path: string): Promise<string[]>;
   stat(handle: ContainerHandle, path: string): Promise<FileStat>;
   exec(handle: ContainerHandle, command: string, opts?: ExecOptions): Promise<ExecResult>;
+  /** Binary-safe exec (stdout as raw Buffer). Optional: executors that only
+   *  produce utf8 output (SSH) may omit it; callers must fall back or reject. */
+  execBuffer?(handle: ContainerHandle, command: string): Promise<Buffer>;
 
   // ---- interactive terminal (R2). Optional so an executor can decline
   // (callers must treat "absent" as "terminal unsupported"); MockExecutor

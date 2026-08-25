@@ -32,6 +32,8 @@ export interface ImageRow {
   is_public: boolean | number;
   tags: string[] | null;
   default_resources: { cpu: number; memoryMb: number; diskGb: number } | null;
+  /** Writable-layer flavor for containers from this image (admin opt-in). */
+  overlay_kind: "ext3" | "dir";
   created_at: string;
   updated_at: string;
 }
@@ -44,6 +46,7 @@ export interface ImageInput {
   is_public?: boolean;
   tags?: string[];
   default_resources?: { cpu: number; memoryMb: number; diskGb: number };
+  overlay_kind?: "ext3" | "dir";
 }
 
 function decode(row: Omit<ImageRow, "tags" | "default_resources" | "is_public"> & Record<string, unknown>, dialect: string): ImageRow {
@@ -82,8 +85,8 @@ export function createImageService(db: Database) {
       const existing = await db.get<{ id: number }>("SELECT id FROM images WHERE name = ?", input.name);
       if (existing) throw new ConflictError(`Image '${input.name}' already exists`);
       const result = await db.run(
-        `INSERT INTO images (name, display_name, sif_path, description, is_public, tags, default_resources)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO images (name, display_name, sif_path, description, is_public, tags, default_resources, overlay_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         input.name,
         input.display_name,
         input.sif_path,
@@ -91,6 +94,7 @@ export function createImageService(db: Database) {
         input.is_public ?? true,
         encodeJson(input.tags ?? null, db.dialect) as SqlValue,
         encodeJson(input.default_resources ?? null, db.dialect) as SqlValue,
+        input.overlay_kind ?? "ext3",
       );
       return (await this.getById(Number(result.lastInsertRowid)))!;
     },
@@ -117,6 +121,10 @@ export function createImageService(db: Database) {
       if (patch.tags !== undefined) {
         sets.push("tags = ?");
         values.push(encodeJson(patch.tags, db.dialect) as SqlValue);
+      }
+      if (patch.overlay_kind !== undefined) {
+        sets.push("overlay_kind = ?");
+        values.push(patch.overlay_kind);
       }
       if (patch.default_resources !== undefined) {
         sets.push("default_resources = ?");

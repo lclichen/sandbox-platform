@@ -155,7 +155,12 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         is_public: Boolean(image.is_public),
         name: image.name,
       });
-      const defaults = image.default_resources ?? { cpu: 1, memoryMb: 1024, diskGb: 5 };
+      // Fallback disk is intentionally small (1 GB): overlays are
+      // pre-allocated ext3 images, so diskGb is real disk usage per container —
+      // on a small single-box deployment 5 GB/container plus same-size
+      // snapshots exhausts the disk fast. Images that need more set their own
+      // default_resources (authoritative override).
+      const defaults = image.default_resources ?? { cpu: 1, memoryMb: 1024, diskGb: 1 };
       const request: ResourceRequest = {
         cpu: input.cpu ?? defaults.cpu,
         memory_mb: input.memoryMb ?? defaults.memoryMb,
@@ -214,6 +219,9 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           diskGb: request.disk_gb,
           env: mergedEnv,
           seedFromPath,
+          // Admin opt-in per image: 'dir' provisions a thin directory overlay
+          // instead of a pre-sized ext3 image (see images.overlay_kind).
+          ...(image.overlay_kind === "dir" ? { overlayKind: "dir" as const } : {}),
         });
         // Record overlay path + node, then mark running.
         await db.run(
@@ -255,7 +263,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           "auto-%",
         );
         if (snap) {
-          await this._restoreFromSnapshot(row, snap);
+          await this._restoreFromSnapshot(row, { id: snap.id, name: snap.name, overlay_path: snap.overlay_path, ...(snap.size_bytes != null ? { size_bytes: snap.size_bytes } : {}) });
           // Clear the marker only AFTER a successful restore — clearing first
           // orphans the resume snapshot on failure (the next start would fall
           // through to the stale overlay).
@@ -365,9 +373,11 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         // it would push the user past their aggregate disk ceiling.
         await quotas.assertAggregateDisk(userId, snap.sizeBytes);
         const result = await db.run(
-          `INSERT INTO snapshots (container_id, name, description, overlay_path, size_bytes)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO snapshots (container_id, user_id, image_id, name, description, overlay_path, size_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           id,
+          userId,
+          row.image_id,
           name,
           description ?? null,
           snap.overlayPath,
@@ -428,6 +438,87 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         "SELECT id, name, description, size_bytes, created_at FROM snapshots WHERE container_id = ? ORDER BY id DESC",
         id,
       );
+    },
+
+    /** The user's snapshots across ALL containers, including save points whose
+     *  container was destroyed/recycled (container_id NULL). This is the
+     *  "game save list" the web UI groups by project. */
+    async listMySnapshots(userId: number) {
+      return db.all<{
+        id: number; name: string; description: string | null; size_bytes: number;
+        created_at: string; container_id: number | null; container_name: string | null;
+        container_status: string | null; image_id: number; image_name: string | null;
+      }>(
+        `SELECT s.id, s.name, s.description, s.size_bytes, s.created_at,
+                s.container_id, c.name AS container_name, c.status AS container_status,
+                s.image_id, i.name AS image_name
+           FROM snapshots s
+           LEFT JOIN containers c ON c.id = s.container_id
+           LEFT JOIN images i ON i.id = s.image_id
+          WHERE s.user_id = ?
+          ORDER BY s.id DESC`,
+        userId,
+      );
+    },
+
+    /** Restore an orphaned (or any owned) snapshot into a BRAND-NEW container:
+     *  create from the snapshot's image with a fresh overlay, then swap the
+     *  snapshot overlay in and start — the recycle-then-restore workflow. */
+    async restoreSnapshotToNewContainer(
+      snapshotId: number,
+      userId: number,
+      name: string,
+      isAdmin = false,
+    ): Promise<ContainerRow> {
+      const snap = await this.requireOwnedSnapshot(snapshotId, userId, isAdmin);
+      if (!snap.image_id) throw new BadRequestError("Snapshot has no recorded image; cannot restore to a new container");
+      const row = await this.create(userId, { imageId: snap.image_id, name });
+      try {
+        await this._restoreFromSnapshot(row, {
+          id: snap.id,
+          name: snap.name,
+          overlay_path: snap.overlay_path,
+          ...(snap.size_bytes != null ? { size_bytes: snap.size_bytes } : {}),
+        });
+      } catch (err) {
+        // Best-effort cleanup of the half-built container; the snapshot row
+        // survives (it owns its files independently).
+        await this.destroy(row.id, userId, isAdmin).catch(() => undefined);
+        throw err;
+      }
+      return (await this.requireById(row.id))!;
+    },
+
+    /** Delete one of MY snapshots — works for orphans too (container gone). */
+    async deleteMySnapshot(snapshotId: number, userId: number, isAdmin = false): Promise<void> {
+      const snap = await this.requireOwnedSnapshot(snapshotId, userId, isAdmin);
+      await executor.removePath(snap.overlay_path, snap.node ?? undefined).catch((err) => {
+        logger.warn({ snapshotId, err: (err as Error).message }, "deleteMySnapshot: file cleanup failed (row still deleted)");
+      });
+      await db.run("DELETE FROM snapshots WHERE id = ?", snapshotId);
+    },
+
+    /** Ownership check for a snapshot row (user_id is the boundary since
+     *  snapshots outlive their containers). */
+    async requireOwnedSnapshot(snapshotId: number, userId: number, isAdmin = false): Promise<{
+      id: number; name: string; overlay_path: string; size_bytes: number | null;
+      image_id: number | null; container_id: number | null; node: string | null;
+    }> {
+      const snap = await db.get<{
+        id: number; name: string; overlay_path: string; size_bytes: number | null;
+        image_id: number | null; container_id: number | null; user_id: number;
+        node: string | null;
+      }>(
+        `SELECT s.id, s.name, s.overlay_path, s.size_bytes, s.image_id, s.container_id, s.user_id,
+                c.node AS node
+           FROM snapshots s LEFT JOIN containers c ON c.id = s.container_id
+          WHERE s.id = ?`,
+        snapshotId,
+      );
+      if (!snap || (!isAdmin && snap.user_id !== userId)) {
+        throw new NotFoundError("Snapshot", snapshotId);
+      }
+      return snap;
     },
 
     async restoreSnapshot(id: number, snapshotId: number, userId: number, isAdmin = false): Promise<ContainerRow> {
@@ -551,6 +642,30 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
 
     /** Expose helpers for the routes layer. */
     _toPublic: (row: ContainerRow, isAdmin = false): ContainerPublic => toPublic(row, db.dialect, isAdmin),
+
+    /** Archive the container's /workspace into the user's cloud workspace as a
+     *  single .tar.gz (one-way export; the reverse direction is create-time
+     *  seeding). Requires a binary-capable executor (local CLI); SSH falls
+     *  back to erroring clearly instead of corrupting the archive. */
+    async exportWorkspaceToUserWorkspace(
+      containerId: number,
+      userId: number,
+      workspaceId: number,
+      isAdmin = false,
+      workspaceService: { uploadFile(wsId: number, ownerId: number, dirRel: string, name: string, content: Buffer, admin?: boolean): Promise<unknown> },
+    ): Promise<{ fileName: string; sizeBytes: number }> {
+      const row = await this.requireOwned(containerId, userId, isAdmin);
+      if (row.status !== "running") throw new ContainerNotRunningError();
+      if (typeof executor.execBuffer !== "function") {
+        throw new Error("This executor cannot export binaries (local apptainer only)");
+      }
+      const handle = handleFromRow(row);
+      const buf = await executor.execBuffer(handle, "tar czf - -C /workspace .");
+      if (buf.byteLength === 0) throw new Error("Export produced an empty archive");
+      const fileName = `${row.name.replace(/[^a-zA-Z0-9_.-]+/g, "_")}-${new Date().toISOString().slice(0, 10)}.tar.gz`;
+      await workspaceService.uploadFile(workspaceId, userId, "", fileName, buf, isAdmin);
+      return { fileName, sizeBytes: buf.byteLength };
+    },
     _quotas: quotas,
     _images: images,
     _executor: executor,

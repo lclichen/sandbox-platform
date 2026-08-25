@@ -24,6 +24,7 @@
 import { Router, type Request } from "express";
 import { getDb, getExecutorFromReq, getLlmEnvProvider } from "../app.ts";
 import { createContainerService } from "../services/container.service.ts";
+import { createWorkspaceService } from "../services/workspace.service.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
 import { UnauthorizedError } from "../utils/errors.ts";
 import {
@@ -189,6 +190,25 @@ export function containersRouter(): Router {
     svc
       .deleteSnapshot(id, sid, actor(req).id, actor(req).isAdmin)
       .then(() => res.status(204).end())
+      .catch(next);
+  });
+
+  // Archive the container's /workspace into one of the user's cloud
+  // workspaces as a .tar.gz (one-way export; create-time seeding is the
+  // reverse direction).
+  router.post("/:id/export-workspace", (req, res, next) => {
+    const { id } = validate(idParamSchema, req.params);
+    const workspaceId = Number(req.body?.workspaceId);
+    if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
+      res.status(400).json({ code: "BAD_REQUEST", message: "workspaceId (positive integer) is required" });
+      return;
+    }
+    const a = actor(req);
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req));
+    const wsSvc = createWorkspaceService(getDb(req));
+    svc
+      .exportWorkspaceToUserWorkspace(id, a.id, workspaceId, a.isAdmin, wsSvc)
+      .then((result) => res.status(201).json(result))
       .catch(next);
   });
 
