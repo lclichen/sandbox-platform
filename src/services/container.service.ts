@@ -320,16 +320,9 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         // Even if destroy fails on the runtime side, mark destroyed in DB.
         logger.warn({ err, containerId: id }, "executor destroy error (container still marked destroyed)");
       }
-      // Snapshot copies belong to the container: free the disk + rows so the
-      // user's aggregate quota is not permanently inflated after destroys.
-      const snaps = await db.all<{ overlay_path: string }>(
-        "SELECT overlay_path FROM snapshots WHERE container_id = ?",
-        id,
-      );
-      for (const snap of snaps) {
-        await executor.removePath(snap.overlay_path, row.node ?? undefined).catch(() => undefined);
-      }
-      await db.run("DELETE FROM snapshots WHERE container_id = ?", id);
+      // Snapshots OUTLIVE the container (migration 0005: user-owned save
+      // points — the recycle-then-restore workflow). Do NOT touch them here;
+      // their rows/files are managed through the user-scoped snapshot APIs.
       await db.run("DELETE FROM overlays WHERE container_id = ?", id);
       await db.run(
         "UPDATE containers SET status = 'destroyed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
