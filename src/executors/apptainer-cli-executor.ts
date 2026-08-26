@@ -35,6 +35,36 @@ import { isValidEnvName } from "./shell-quote.ts";
  */
 const ISOLATION_FLAGS = ["--contain", "--no-mount", "hostfs,cwd"];
 
+// ---- host-side PTY for openPty ----
+// Lazy dynamic import: a missing/broken native module degrades to an
+// openPty error (the WS layer replies 501/1011) instead of crashing the
+// executor at import time.
+interface HostPtyTerm {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(signal?: string): void;
+  onData(cb: (data: string) => void): void;
+  onExit(cb: (e: { exitCode: number; signal?: number }) => void): void;
+}
+let hostPtyPromise: Promise<{ spawn: (file: string, args: string[], opts: Record<string, unknown>) => HostPtyTerm }> | null = null;
+function loadHostPty(): ReturnType<typeof loadHostPtyOnce> {
+  hostPtyPromise ??= loadHostPtyOnce();
+  return hostPtyPromise;
+}
+async function loadHostPtyOnce() {
+  const mod = (await import("@homebridge/node-pty-prebuilt-multiarch")) as unknown as {
+    spawn?: unknown;
+    default?: { spawn?: unknown };
+  };
+  // CJS package: pick spawn off the namespace or the default interop wrapper,
+  // whichever the runtime synthesized.
+  const spawn = (mod.spawn ?? mod.default?.spawn) as
+    | ((file: string, args: string[], opts: Record<string, unknown>) => HostPtyTerm)
+    | undefined;
+  if (typeof spawn !== "function") throw new Error("PTY 模块缺少 spawn 导出");
+  return { spawn };
+}
+
 export class ApptainerCliExecutor implements SandboxExecutor {
   readonly kind: ExecutorKind = "apptainer-cli";
   private readonly bin: string;
@@ -303,44 +333,54 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   }
 
   /**
-   * Interactive container terminal (R2): spawn `apptainer exec instance://<id>
-   * bash` with pipes. Not a real TTY (spawn cannot allocate one without
-   * node-pty), so interactive programs that require a pty degrade — plain
-   * shell I/O works. Resize is accepted as a no-op.
+   * Interactive container terminal (R2): `apptainer exec --pwd /workspace
+   * instance://<id> bash` on a REAL host-side PTY (node-pty). With plain
+   * pipes bash runs non-interactive: no prompt, no echo — the web terminal
+   * renders a black screen with nothing but the ready frame. A host PTY is
+   * propagated by apptainer into the container, so prompt/echo/colors and
+   * resize all behave like a local terminal.
    */
   async openPty(handle: ContainerHandle, opts: PtyOptions): Promise<PtySession> {
+    const pty = await loadHostPty();
     // --pwd /workspace: without it the shell starts in the instance's inherited
     // HOST cwd (missing in-container), which apptainer "fixes" by falling back
     // to /home/<user> — the web terminal then looks like the host machine.
-    const child = spawn(this.bin, ["exec", "--pwd", "/workspace", `instance://${handle.id}`, "bash"], {
-      windowsHide: true,
+    const term = pty.spawn(this.bin, ["exec", "--pwd", "/workspace", `instance://${handle.id}`, "bash"], {
+      name: "xterm-256color",
+      cols: opts.cols > 0 ? opts.cols : 80,
+      rows: opts.rows > 0 ? opts.rows : 24,
+      cwd: "/tmp",
+      env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
     });
-    void opts;
     let exited = false;
     return {
       write(data: string) {
-        if (!child.stdin.destroyed) child.stdin.write(data);
+        if (!exited) term.write(data);
       },
-      resize(_cols: number, _rows: number) {
-        /* pipes cannot be resized; no-op */
+      resize(cols: number, rows: number) {
+        if (exited || cols <= 0 || rows <= 0) return;
+        try {
+          term.resize(cols, rows);
+        } catch {
+          /* torn-down pty */
+        }
       },
       kill() {
-        if (!exited) child.kill("SIGKILL");
+        if (exited) return;
+        exited = true;
+        try {
+          term.kill();
+        } catch {
+          /* already gone */
+        }
       },
       onData(cb) {
-        child.stdout.on("data", (d: Buffer) => cb(d));
-        child.stderr.on("data", (d: Buffer) => cb(d));
+        term.onData((d: string) => cb(Buffer.from(d, "utf8")));
       },
       onExit(cb) {
-        child.on("close", (code) => {
+        term.onExit(({ exitCode }) => {
           exited = true;
-          cb(code);
-        });
-        child.on("error", () => {
-          if (!exited) {
-            exited = true;
-            cb(null);
-          }
+          cb(exitCode);
         });
       },
     };
