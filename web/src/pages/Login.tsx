@@ -65,7 +65,7 @@ export function Login() {
   return (
     <div className="login-wrap">
       <div className="login-card">
-        <h1>Sandbox Platform</h1>
+        <h1>amedac.ai · 沙盒管理台</h1>
         <p className="subtitle">Admin console</p>
 
         {needsPasswordChange ? (

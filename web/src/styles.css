@@ -14,6 +14,18 @@
   --radius: 6px;
 }
 
+/* 日间模式：html[data-theme="light"] 覆盖色板，其余样式全部复用 */
+:root[data-theme="light"] {
+  --bg: #f3f5f8;
+  --panel: #ffffff;
+  --panel-2: #eaeef3;
+  --border: #d7dde6;
+  --text: #1c2530;
+  --text-dim: #5d6c7c;
+  --accent: #2563eb;
+  --accent-hover: #1d51c7;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -117,10 +129,41 @@ label {
   flex-shrink: 0;
 }
 .sidebar .brand {
-  padding: 0 18px 18px;
-  font-weight: 600;
-  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 16px 14px;
   border-bottom: 1px solid var(--border);
+}
+.brand .brand-logo {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+.brand .brand-name {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+  color: var(--text);
+  line-height: 1.2;
+}
+.brand .brand-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.theme-toggle-row {
+  padding: 10px 18px 2px;
+}
+.theme-toggle {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px dashed var(--border);
+}
+.theme-toggle:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-2);
 }
 .sidebar nav {
   display: flex;
@@ -263,7 +306,11 @@ label {
 }
 table {
   width: 100%;
+  min-width: 760px; /* 列多时保持可读宽度，宁横向滚动也不挤成空白 */
   border-collapse: collapse;
+}
+.ws-file-list table {
+  min-width: 0;
 }
 th,
 td {
@@ -279,6 +326,9 @@ th {
   text-transform: uppercase;
   letter-spacing: 0.4px;
   background: var(--panel-2);
+  position: sticky;
+  top: 0;
+  z-index: 1; /* 长列表滚动时表头钉住 */
 }
 tr:last-child td {
   border-bottom: none;
@@ -287,8 +337,12 @@ tr:hover td {
   background: rgba(74, 158, 255, 0.05);
 }
 td.actions {
-  display: flex;
-  gap: 6px;
+  white-space: nowrap;
+}
+td.actions button + button,
+td.actions a + button,
+td.actions button + a {
+  margin-left: 6px;
 }
 
 /* ---- badges ---- */

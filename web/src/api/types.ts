@@ -66,6 +66,8 @@ export interface ImageRow {
   is_public: boolean;
   tags: string[] | null;
   default_resources: { cpu: number; memoryMb: number; diskGb: number } | null;
+  /** Per-user instance cap (project-template policies); null = unlimited. */
+  max_per_user: number | null;
   created_at: string;
   updated_at: string;
 }

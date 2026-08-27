@@ -12,6 +12,7 @@ interface Draft {
   description: string;
   is_public: boolean;
   tags: string; // comma-separated in the form
+  max_per_user: string; // "" = unlimited
   cpu: string;
   memoryMb: string;
   diskGb: string;
@@ -24,6 +25,7 @@ const EMPTY: Draft = {
   description: "",
   is_public: true,
   tags: "",
+  max_per_user: "",
   cpu: "1",
   memoryMb: "1024",
   diskGb: "5",
@@ -37,6 +39,7 @@ function draftFromImage(img: ImageRow): Draft {
     description: img.description ?? "",
     is_public: img.is_public,
     tags: (img.tags ?? []).join(", "),
+    max_per_user: img.max_per_user != null ? String(img.max_per_user) : "",
     cpu: String(img.default_resources?.cpu ?? 1),
     memoryMb: String(img.default_resources?.memoryMb ?? 1024),
     diskGb: String(img.default_resources?.diskGb ?? 5),
@@ -92,19 +95,20 @@ export function Images() {
               <th>Public</th>
               <th>Tags</th>
               <th>Default resources</th>
+              <th title="每个用户最多可创建多少个基于此镜像的容器">每人实例上限</th>
               {isAdmin && <th>Actions</th>}
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={isAdmin ? 7 : 6} className="center-msg">
+                <td colSpan={isAdmin ? 8 : 7} className="center-msg">
                   Loading…
                 </td>
               </tr>
             ) : images.length === 0 ? (
               <tr>
-                <td colSpan={isAdmin ? 7 : 6} className="center-msg">
+                <td colSpan={isAdmin ? 8 : 7} className="center-msg">
                   No images.
                 </td>
               </tr>
@@ -122,6 +126,19 @@ export function Images() {
                     {img.default_resources
                       ? `${img.default_resources.cpu}cpu / ${img.default_resources.memoryMb}MB / ${img.default_resources.diskGb}GB`
                       : "—"}
+                  </td>
+                  <td>
+                    {isAdmin ? (
+                      img.max_per_user != null && img.max_per_user > 0 ? (
+                        <span className="badge admin">{img.max_per_user} / 人</span>
+                      ) : (
+                        <span className="muted">不限</span>
+                      )
+                    ) : img.max_per_user != null && img.max_per_user > 0 ? (
+                      `${img.max_per_user}`
+                    ) : (
+                      "—"
+                    )}
                   </td>
                   {isAdmin && (
                     <td className="actions">
@@ -183,6 +200,8 @@ function ImageModal({
         description: draft.description || undefined,
         is_public: draft.is_public,
         tags,
+        max_per_user:
+          draft.max_per_user.trim() === "" ? null : Number(draft.max_per_user),
         default_resources: {
           cpu: Number(draft.cpu) || 1,
           memoryMb: Number(draft.memoryMb) || 1024,
@@ -226,6 +245,16 @@ function ImageModal({
       <div className="form-field">
         <label>Tags (comma-separated)</label>
         <input value={draft.tags} onChange={(e) => set("tags", e.target.value)} placeholder="linux, node, base" />
+      </div>
+      <div className="form-field">
+        <label>每用户实例上限（留空 = 不限）</label>
+        <input
+          type="number"
+          min={1}
+          value={draft.max_per_user}
+          onChange={(e) => set("max_per_user", e.target.value)}
+          placeholder="例如 1：每个用户只能创建一个该镜像的容器"
+        />
       </div>
       <div className="row-grid two">
         <div className="form-field">
