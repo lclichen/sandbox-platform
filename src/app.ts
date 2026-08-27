@@ -105,9 +105,18 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
 
   // Security headers (P1-1). CSP tuned for the SPA: same-origin scripts, inline
   // styles allowed (React style attributes), images may be inline data: URIs.
+  //
+  // This app ships as a PLAIN-HTTP LAN service (no TLS listener). helmet's
+  // defaults inject `upgrade-insecure-requests` into the CSP and always send
+  // HSTS — both tell the browser to rewrite every http:// subresource to
+  // https://, which breaks the admin console on remote machines with
+  // ERR_SSL_PROTOCOL_ERROR. Drop them here; add such headers at the TLS-
+  // terminating reverse proxy if one is ever put in front.
   app.use(
     helmet({
+      hsts: false,
       contentSecurityPolicy: {
+        useDefaults: true,
         directives: {
           defaultSrc: ["'self'"],
           scriptSrc: ["'self'"],
@@ -118,6 +127,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
           objectSrc: ["'none'"],
           baseUri: ["'self'"],
           frameAncestors: ["'none'"],
+          "upgrade-insecure-requests": null,
         },
       },
     }),
