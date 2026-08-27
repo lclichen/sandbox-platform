@@ -34,6 +34,9 @@ export interface ImageRow {
   default_resources: { cpu: number; memoryMb: number; diskGb: number } | null;
   /** Writable-layer flavor for containers from this image (admin opt-in). */
   overlay_kind: "ext3" | "dir";
+  /** Per-user instance cap for this image; null/0 = unlimited. Enforced at
+   *  container create (drives the one-DocQA-per-student style policies). */
+  max_per_user: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -47,6 +50,7 @@ export interface ImageInput {
   tags?: string[];
   default_resources?: { cpu: number; memoryMb: number; diskGb: number };
   overlay_kind?: "ext3" | "dir";
+  max_per_user?: number | null;
 }
 
 function decode(row: Omit<ImageRow, "tags" | "default_resources" | "is_public"> & Record<string, unknown>, dialect: string): ImageRow {
@@ -85,8 +89,8 @@ export function createImageService(db: Database) {
       const existing = await db.get<{ id: number }>("SELECT id FROM images WHERE name = ?", input.name);
       if (existing) throw new ConflictError(`Image '${input.name}' already exists`);
       const result = await db.run(
-        `INSERT INTO images (name, display_name, sif_path, description, is_public, tags, default_resources, overlay_kind)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO images (name, display_name, sif_path, description, is_public, tags, default_resources, overlay_kind, max_per_user)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         input.name,
         input.display_name,
         input.sif_path,
@@ -95,6 +99,7 @@ export function createImageService(db: Database) {
         encodeJson(input.tags ?? null, db.dialect) as SqlValue,
         encodeJson(input.default_resources ?? null, db.dialect) as SqlValue,
         input.overlay_kind ?? "ext3",
+        input.max_per_user ?? null,
       );
       return (await this.getById(Number(result.lastInsertRowid)))!;
     },
@@ -125,6 +130,13 @@ export function createImageService(db: Database) {
       if (patch.overlay_kind !== undefined) {
         sets.push("overlay_kind = ?");
         values.push(patch.overlay_kind);
+      }
+      if (patch.max_per_user !== undefined) {
+        // null clears the cap; a positive integer sets it
+        const maxPerUser =
+          patch.max_per_user === null ? null : Number(patch.max_per_user);
+        sets.push("max_per_user = ?");
+        values.push(maxPerUser !== null && maxPerUser > 0 ? maxPerUser : null as SqlValue);
       }
       if (patch.default_resources !== undefined) {
         sets.push("default_resources = ?");

@@ -205,6 +205,32 @@ export function createQuotaService(db: Database) {
     },
 
     /**
+     * Per-image per-user instance cap (images.max_per_user): a user may own at
+     * most N non-destroyed containers of this image, regardless of tier. The
+     * vehicle for project-template policies ("one DocQA per student").
+     * max<=0 / null = unlimited.
+     */
+    async assertImageInstanceLimit(
+      userId: number,
+      image: { id: number; max_per_user?: number | null; name?: string },
+    ): Promise<void> {
+      const max = Number(image.max_per_user ?? 0);
+      if (!Number.isFinite(max) || max <= 0) return;
+      const usage = await db.get<{ c: number }>(
+        "SELECT COUNT(*) AS c FROM containers WHERE user_id = ? AND image_id = ? AND status != 'destroyed'",
+        userId,
+        image.id,
+      );
+      const used = Number(usage?.c ?? 0);
+      if (used >= max) {
+        throw new QuotaExceededError(
+          `镜像 ${image.name ?? image.id} 每用户最多创建 ${max} 个实例（当前 ${used}/${max}）`,
+          { used, limit: max },
+        );
+      }
+    },
+
+    /**
      * Enforce the user's AGGREGATE disk usage (manual §5.3): sum of overlay +
      * snapshot + workspace bytes must stay within max_disk_gb. `additionalBytes`
      * accounts for the resource about to be created (snapshot copy / upload).

@@ -97,6 +97,8 @@ export const createImageSchema = z.object({
   is_public: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
   overlay_kind: z.enum(["ext3", "dir"]).optional(),
+  // Per-user instance cap for this image (null/undefined = unlimited).
+  max_per_user: z.number().int().min(1).max(10000).nullable().optional(),
   default_resources: z
     .object({
       cpu: z.number().int().min(1).max(1024),

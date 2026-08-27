@@ -168,6 +168,12 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       };
       // Enforce quota before any provisioning.
       await quotas.assertCanCreate(userId, request);
+      // Per-image per-user instance cap (project-template policies).
+      await quotas.assertImageInstanceLimit(userId, {
+        id: image.id,
+        max_per_user: Number((image as { max_per_user?: number | null }).max_per_user ?? 0),
+        name: image.name,
+      });
 
       // Inject platform-managed env (LLM base URL + virtual key) when the owner
       // has an active binding. The LLM env wins over user-supplied same-name
