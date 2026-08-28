@@ -52,7 +52,6 @@ export function Dashboard() {
   if (!view) return null;
 
   const statusEntries = Object.entries(view.containersByStatus).filter(([, v]) => v > 0);
-  const maxStatus = Math.max(1, ...statusEntries.map(([, v]) => v));
 
   return (
     <>
@@ -77,27 +76,20 @@ export function Dashboard() {
       </div>
 
       <div className="page-header">
-        <h1 style={{ fontSize: 16 }}>Containers by status</h1>
+        <h1 style={{ fontSize: 16 }}>{t("Containers by status")}</h1>
       </div>
       {statusEntries.length === 0 ? (
-        <div className="center-msg">No containers yet.</div>
+        <div className="center-msg">{t("No containers yet.")}</div>
       ) : (
-        <div className="table-wrap" style={{ maxWidth: 480 }}>
+        <div className="table-wrap">
           <table>
             <tbody>
               {statusEntries.map(([status, count]) => (
                 <tr key={status}>
-                  <td style={{ width: 140 }}>
-                    <span className={`badge ${status}`}>{status}</span>
+                  <td style={{ width: 160 }}>
+                    <span className={`badge ${status}`}>{t(status)}</span>
                   </td>
-                  <td>
-                    <div style={{ height: 8, background: "var(--border)", borderRadius: 4, overflow: "hidden" }}>
-                      <div
-                        style={{ height: "100%", width: `${(count / maxStatus) * 100}%`, background: "var(--accent)" }}
-                      />
-                    </div>
-                  </td>
-                  <td style={{ width: 50, textAlign: "right" }}>{count}</td>
+                  <td style={{ textAlign: "right", color: "var(--text)" }}>{count}</td>
                 </tr>
               ))}
             </tbody>

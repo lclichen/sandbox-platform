@@ -38,6 +38,11 @@ export const zhMessages: Record<string, string> = {
   "Name": "名称",
   "Status": "状态",
   "Confirm": "确认",
+  "Containers by status": "容器状态分布",
+  "No containers yet.": "暂无容器。",
+  "Running containers": "运行中的容器",
+  "Failures (24h)": "近 24 小时失败",
+  "My containers": "我的容器",
   // 容器页
   "ID": "ID",
   "Owner": "属主",
