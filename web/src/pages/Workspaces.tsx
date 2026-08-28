@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api/client";
+import { useConsoleLang } from "../i18n";
 import type { WorkspaceRow } from "../api/types";
 import { Modal, ModalActions } from "../components/Modal";
 import { ConfirmButton } from "../components/ConfirmDialog";
@@ -41,6 +42,7 @@ function formatSize(bytes: number): string {
 }
 
 export function Workspaces() {
+  const { t } = useConsoleLang();
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +69,7 @@ export function Workspaces() {
   return (
     <>
       <div className="page-header">
-        <h1>Workspaces</h1>
+        <h1>{t("Workspaces")}</h1>
         <button className="primary" onClick={() => setEditing({ draft: { ...EMPTY } })}>
           + New workspace
         </button>

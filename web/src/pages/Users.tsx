@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
+import { useConsoleLang } from "../i18n";
 import type { QuotaRow, UserPublic } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Modal, ModalActions } from "../components/Modal";
@@ -11,6 +12,7 @@ const PAGE_SIZE = 20;
 type StatusFilter = "" | "active" | "disabled" | "pending";
 
 export function Users() {
+  const { t } = useConsoleLang();
   const { user: currentUser } = useAuth();
   const [users, setUsers] = useState<UserPublic[]>([]);
   const [total, setTotal] = useState(0);
@@ -58,7 +60,7 @@ export function Users() {
   return (
     <>
       <div className="page-header">
-        <h1>Users</h1>
+        <h1>{t("Users")}</h1>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => void load()}>Refresh</button>
           <button onClick={() => setImporting(true)}>Import CSV</button>

@@ -4,10 +4,12 @@ import type { ContainerPublic, SnapshotRow } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { StatusBadge } from "../components/StatusBadge";
 import { ConfirmButton } from "../components/ConfirmDialog";
+import { useConsoleLang } from "../i18n";
 
 const PAGE_SIZE = 30;
 
 export function Containers() {
+  const { t } = useConsoleLang();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const [containers, setContainers] = useState<ContainerPublic[]>([]);
@@ -48,7 +50,7 @@ export function Containers() {
   return (
     <>
       <div className="page-header">
-        <h1>Containers</h1>
+        <h1>{t("Containers")}</h1>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span className="muted">{isAdmin ? "all users · admin view" : "my containers"}</span>
           <button className="small" onClick={() => void load()}>Refresh</button>
@@ -59,11 +61,11 @@ export function Containers() {
 
       <div className="toolbar">
         <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setOffset(0); }}>
-          <option value="">All statuses</option>
-          <option value="running">running</option>
-          <option value="stopped">stopped</option>
-          <option value="error">error</option>
-          <option value="destroyed">destroyed</option>
+          <option value="">{t("All statuses")}</option>
+          <option value="running">{t("running")}</option>
+          <option value="stopped">{t("stopped")}</option>
+          <option value="error">{t("error")}</option>
+          <option value="destroyed">{t("destroyed")}</option>
         </select>
       </div>
 
@@ -71,26 +73,26 @@ export function Containers() {
         <table>
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Owner</th>
-              <th>Status</th>
-              <th>Resources</th>
-              <th>Created</th>
-              <th>Actions</th>
+              <th>{t("ID")}</th>
+              <th>{t("Name")}</th>
+              <th>{t("Owner")}</th>
+              <th>{t("Status")}</th>
+              <th>{t("Resources")}</th>
+              <th>{t("Created")}</th>
+              <th>{t("Actions")}</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
                 <td colSpan={7} className="center-msg">
-                  Loading…
+                  {t("Loading…")}
                 </td>
               </tr>
             ) : containers.length === 0 ? (
               <tr>
                 <td colSpan={7} className="center-msg">
-                  No containers.
+                  {t("No containers.")}
                 </td>
               </tr>
             ) : (
@@ -193,6 +195,7 @@ function SnapshotsPane({
   containerId: number;
   onAct: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
+  const { t } = useConsoleLang();
   const [snaps, setSnaps] = useState<SnapshotRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -241,17 +244,17 @@ function SnapshotsPane({
       </div>
       {error && <div className="error-banner">{error}</div>}
       {!snaps ? (
-        <div className="muted">Loading…</div>
+        <div className="muted">{t("Loading…")}</div>
       ) : snaps.length === 0 ? (
         <div className="muted">No snapshots.</div>
       ) : (
         <table>
           <thead>
             <tr>
-              <th>Name</th>
+              <th>{t("Name")}</th>
               <th>Size</th>
-              <th>Created</th>
-              <th>Actions</th>
+              <th>{t("Created")}</th>
+              <th>{t("Actions")}</th>
             </tr>
           </thead>
           <tbody>

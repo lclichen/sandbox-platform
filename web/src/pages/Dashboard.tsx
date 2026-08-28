@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api/client";
+import { useConsoleLang } from "../i18n";
 import { useAuth } from "../auth/AuthContext";
 
 // Admin sees the global dashboard; regular users see their own scoped summary.
@@ -14,6 +15,7 @@ interface DashView {
 }
 
 export function Dashboard() {
+  const { t } = useConsoleLang();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const [view, setView] = useState<DashView | null>(null);
@@ -55,7 +57,7 @@ export function Dashboard() {
   return (
     <>
       <div className="page-header">
-        <h1>Dashboard</h1>
+        <h1>{t("Dashboard")}</h1>
         <span className="muted">{view.meta}</span>
       </div>
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api/client";
+import { useConsoleLang } from "../i18n";
 import type { LogRow } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 
@@ -22,6 +23,7 @@ const EMPTY_FILTERS: Filters = {
 };
 
 export function Logs() {
+  const { t } = useConsoleLang();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
@@ -78,7 +80,7 @@ export function Logs() {
   return (
     <>
       <div className="page-header">
-        <h1>Operation logs</h1>
+        <h1>{t("Operation logs")}</h1>
         <span className="muted">
           {total} entr{total === 1 ? "y" : "ies"}
         </span>

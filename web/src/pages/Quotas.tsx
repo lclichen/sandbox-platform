@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api/client";
+import { useConsoleLang } from "../i18n";
 import type { ImageRow, QuotaRow } from "../api/types";
 import { Modal, ModalActions } from "../components/Modal";
 import { ConfirmButton } from "../components/ConfirmDialog";
@@ -17,6 +18,7 @@ const EMPTY: Omit<QuotaRow, "id" | "created_at" | "updated_at"> = {
 };
 
 export function Quotas() {
+  const { t } = useConsoleLang();
   const [quotas, setQuotas] = useState<QuotaRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +61,7 @@ export function Quotas() {
   return (
     <>
       <div className="page-header">
-        <h1>Resource quotas</h1>
+        <h1>{t("Resource quotas")}</h1>
         <button className="primary" onClick={startCreate}>
           + New quota
         </button>

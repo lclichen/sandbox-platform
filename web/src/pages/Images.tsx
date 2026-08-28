@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api/client";
+import { useConsoleLang } from "../i18n";
 import type { ImageRow } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Modal, ModalActions } from "../components/Modal";
@@ -47,6 +48,7 @@ function draftFromImage(img: ImageRow): Draft {
 }
 
 export function Images() {
+  const { t } = useConsoleLang();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const [images, setImages] = useState<ImageRow[]>([]);
@@ -75,10 +77,10 @@ export function Images() {
   return (
     <>
       <div className="page-header">
-        <h1>Images</h1>
+        <h1>{t("Images")}</h1>
         {isAdmin && (
           <button className="primary" onClick={() => setEditing({ draft: { ...EMPTY } })}>
-            + New image
+            {t("+ New image")}
           </button>
         )}
       </div>
@@ -89,27 +91,27 @@ export function Images() {
         <table>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Display name</th>
+              <th>{t("Name")}</th>
+              <th>{t("Display name")}</th>
               <th>SIF path</th>
-              <th>Public</th>
-              <th>Tags</th>
-              <th>Default resources</th>
+              <th>{t("Public")}</th>
+              <th>{t("Tags")}</th>
+              <th>{t("Default resources")}</th>
               <th title="每个用户最多可创建多少个基于此镜像的容器">每人实例上限</th>
-              {isAdmin && <th>Actions</th>}
+              {isAdmin && <th>{t("Actions")}</th>}
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
                 <td colSpan={isAdmin ? 8 : 7} className="center-msg">
-                  Loading…
+                  {t("Loading…")}
                 </td>
               </tr>
             ) : images.length === 0 ? (
               <tr>
                 <td colSpan={isAdmin ? 8 : 7} className="center-msg">
-                  No images.
+                  {t("No images.")}
                 </td>
               </tr>
             ) : (

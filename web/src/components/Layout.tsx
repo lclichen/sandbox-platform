@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { ApiKeysModal } from "./ApiKeysModal";
+import { useConsoleLang } from "../i18n";
 
 // Pages visible to every authenticated user.
 const COMMON_NAV: Array<{ to: string; label: string }> = [
@@ -29,6 +30,7 @@ function initialTheme(): Theme {
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const { lang, setLang, t } = useConsoleLang();
   const isAdmin = user?.role === "admin";
   const [showKeys, setShowKeys] = useState(false);
   const [theme, setTheme] = useState<Theme>(initialTheme);
@@ -54,7 +56,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       end={item.to === "/"}
       className={({ isActive }) => (isActive ? "active" : "")}
     >
-      {item.label}
+      {t(item.label)}
     </NavLink>
   );
 
@@ -85,7 +87,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                   color: "var(--text-dim)",
                 }}
               >
-                Administration
+                {t("Administration")}
               </div>
               {ADMIN_NAV.map(renderItem)}
             </>
@@ -95,16 +97,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <button className="theme-toggle" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             {theme === "dark" ? "☀ 切换日间模式" : "☾ 切换夜间模式"}
           </button>
+          <button className="theme-toggle" onClick={() => setLang(lang === "zh" ? "en" : "zh")}>
+            {lang === "zh" ? "EN English" : "中文 中文"}
+          </button>
         </div>
         {user && (
           <div className="user-box">
             <div className="name">{user.username}</div>
             <div className="role">{user.role}</div>
             <button className="small" onClick={() => setShowKeys(true)} style={{ marginTop: 8, width: "100%" }}>
-              My API keys
+              {t("My API keys")}
             </button>
             <button className="small" onClick={handleLogout} style={{ marginTop: 6, width: "100%" }}>
-              Log out
+              {t("Log out")}
             </button>
           </div>
         )}
