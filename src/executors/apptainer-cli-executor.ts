@@ -35,6 +35,16 @@ import { isValidEnvName } from "./shell-quote.ts";
  */
 const ISOLATION_FLAGS = ["--contain", "--no-mount", "hostfs,cwd"];
 
+/**
+ * Hosts without /etc/resolv.conf (seen on hardened/HPC nodes) break
+ * apptainer's default resolv.conf handling — `instance start` aborts with
+ * "while executing starter: ... exit status 255". `--dns 127.0.0.1` makes
+ * apptainer synthesize /etc/resolv.conf inside the container instead of
+ * copying the host file, so startup no longer depends on it. Detected once
+ * per process: the file's existence does not change while we run.
+ */
+const DNS_FALLBACK_FLAGS = existsSync("/etc/resolv.conf") ? [] : ["--dns", "127.0.0.1"];
+
 // ---- host-side PTY for openPty ----
 // Lazy dynamic import: a missing/broken native module degrades to an
 // openPty error (the WS layer replies 501/1011) instead of crashing the
@@ -125,6 +135,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await this.runLifecycle([
       "instance", "start",
       ...ISOLATION_FLAGS,
+      ...DNS_FALLBACK_FLAGS,
       // Resource limits need cgroup support; only apply when enabled (default
       // OFF: rootless + cgroup-v1 hosts fail instance start with "rootless
       // cgroups requires cgroups v2").
@@ -242,6 +253,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     await this.runLifecycle([
       "instance", "start",
       ...ISOLATION_FLAGS,
+      ...DNS_FALLBACK_FLAGS,
       ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       ...envArgs(req.env),
