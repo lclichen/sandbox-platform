@@ -5,8 +5,9 @@
  * testable and free of scattered `process.env` reads.
  */
 import "dotenv/config";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, isAbsolute, resolve as pathResolve } from "node:path";
+import { dirname, isAbsolute, join, resolve as pathResolve } from "node:path";
 
 /**
  * Package root (the directory containing src/): data-dir DEFAULTS and any
@@ -296,6 +297,40 @@ const KNOWN_WEAK_LITELLM_KEYS = new Set(["sk-1234", "sk-123456"]);
  * defaults. Returns the list of problems (empty when all is well) so callers
  * can print remediation guidance before exiting.
  */
+/**
+ * Fail fast when a writable data dir sits on a read-only filesystem — e.g. the
+ * default ./data/* inside an AppImage squashfs mount or any package dir that
+ * gets replaced on upgrade. Without this the platform boots healthy and only
+ * fails much later (first workspace upload / image import) with EROFS.
+ */
+export function assertWritableDataDirs(config: AppConfig): void {
+  const dirs: Array<[string, string]> = [
+    ["DB_SQLITE_PATH", dirname(config.db.sqlitePath)],
+  ];
+  if (config.executor.kind === "apptainer-cli") {
+    dirs.push(
+      ["OVERLAY_BASE_DIR", config.executor.apptainer.overlayBaseDir],
+      ["IMAGE_BASE_DIR", config.executor.apptainer.imageBaseDir],
+      ["WORKSPACE_BASE_DIR", config.executor.apptainer.workspaceBaseDir],
+    );
+  }
+  // SSH executor dirs are paths on the remote compute node — never probed here.
+  for (const [envName, dir] of dirs) {
+    try {
+      mkdirSync(dir, { recursive: true });
+      const probeFile = join(dir, `.write-probe-${process.pid}`);
+      writeFileSync(probeFile, "ok");
+      rmSync(probeFile);
+    } catch (err) {
+      throw new Error(
+        `可写数据目录不可用: ${dir} (${envName})——只读文件系统或无权限。" +
+        "平台会在首次写入（如工作区上传/镜像导入）时失败，请把 ${envName} 指向可写目录后重启。" +
+        "原始错误: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
 export function assertSecureProductionConfig(config: AppConfig): string[] {
   if (config.nodeEnv !== "production") return [];
   const problems: string[] = [];

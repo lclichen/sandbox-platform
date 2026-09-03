@@ -10,10 +10,13 @@ import { getExecutor } from "./executors/index.ts";
 import { createReaper } from "./scheduler/reaper.ts";
 import { attachPtyServer } from "./routes/pty.ts";
 import { logger } from "./utils/logger.ts";
-import { loadConfig, assertSecureProductionConfig } from "./config.ts";
+import { loadConfig, assertSecureProductionConfig, assertWritableDataDirs } from "./config.ts";
 
 async function main() {
   const config = loadConfig();
+  // Read-only data dirs (AppImage mount / package dir) must fail at boot, not
+  // at the first workspace upload.
+  assertWritableDataDirs(config);
 
   // Process-level error capture: surface unhandled rejections / exceptions in
   // the structured log before the process exits (Node's default is to exit on
