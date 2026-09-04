@@ -12,7 +12,22 @@ import type { Database } from "../db/driver.ts";
 import type { SandboxExecutor, ContainerHandle } from "../executors/types.ts";
 import { createContainerService } from "./container.service.ts";
 import { truncate } from "../utils/truncate.ts";
+import { HttpError } from "../utils/errors.ts";
 import { posix as posixPath } from "node:path";
+
+// Resource caps (fix plan C4). The platform is a single multi-tenant process:
+// every one of these bounds a user-controllable input that could otherwise
+// balloon memory or pin the event loop (unbounded stderr, whole-file reads of
+// huge files, catastrophic-backtracking regexes on long lines, unbounded
+// directory walks).
+const READ_MAX_BYTES = 2 * 1024 * 1024;
+const GREP_MAX_PATTERN_CHARS = 1_000;
+/** Truncating each line before regex execution defuses ReDoS amplification:
+ *  catastrophic backtracking needs long input, and no useful match line is
+ *  larger than this. */
+const GREP_MAX_LINE_CHARS = 10_000;
+const WALK_MAX_FILES = 20_000;
+const WALK_MAX_DEPTH = 32;
 
 export interface ReadResult {
   contentBase64: string;
@@ -53,12 +68,32 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
     return containers.resolveRunningHandle(cid, userId);
   }
 
+  /** Read a file with a hard size cap (missing files still surface the
+   *  executor's canonical not-found error — stat failures fall through). */
+  async function readCapped(handle: ContainerHandle, path: string): Promise<Buffer> {
+    try {
+      const s = await executor.stat(handle, path);
+      if (s.size > READ_MAX_BYTES) {
+        throw new HttpError(413, "FILE_TOO_LARGE", `File is larger than the ${READ_MAX_BYTES}-byte read cap`);
+      }
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      // stat failed (missing/unreadable) — readFile below produces the
+      // canonical error shape.
+    }
+    const buf = await executor.readFile(handle, path);
+    if (buf.length > READ_MAX_BYTES) {
+      throw new HttpError(413, "FILE_TOO_LARGE", `File is larger than the ${READ_MAX_BYTES}-byte read cap`);
+    }
+    return buf;
+  }
+
   return {
     containers,
 
     async read(cid: number, userId: number, path: string): Promise<ReadResult> {
       const { handle } = await resolve(cid, userId);
-      const buf = await executor.readFile(handle, path);
+      const buf = await readCapped(handle, path);
       return { contentBase64: buf.toString("base64"), size: buf.length };
     },
 
@@ -77,7 +112,7 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
       newText: string,
     ): Promise<{ applied: boolean; size: number }> {
       const { handle } = await resolve(cid, userId);
-      const current = (await executor.readFile(handle, path)).toString("utf8");
+      const current = (await readCapped(handle, path)).toString("utf8");
       if (!current.includes(oldText)) {
         return { applied: false, size: current.length };
       }
@@ -126,17 +161,23 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
       const { handle } = await resolve(cid, userId);
       const result = await executor.exec(handle, command, opts);
       const truncated = truncate(result.stdout, { maxBytes: 50000, maxLines: 2000 });
+      // stderr is just as user-controllable as stdout (`ls / >&2`) and used to
+      // flow back uncapped into the JSON response.
+      const truncatedErr = truncate(result.stderr, { maxBytes: 50000, maxLines: 2000 });
       return {
         stdout: truncated.content,
-        stderr: result.stderr,
+        stderr: truncatedErr.content,
         exitCode: result.exitCode,
         timedOut: result.timedOut,
-        truncated: truncated.truncated,
+        truncated: truncated.truncated || truncatedErr.truncated,
       };
     },
 
     async grep(cid: number, userId: number, params: GrepParams): Promise<string> {
       const { handle } = await resolve(cid, userId);
+      if (params.pattern.length > GREP_MAX_PATTERN_CHARS) {
+        throw new HttpError(400, "PATTERN_TOO_LONG", `grep pattern exceeds ${GREP_MAX_PATTERN_CHARS} characters`);
+      }
       // Portable pure-JS implementation: walk files via executor primitives so
       // it works identically on Mock (win32) and real (Linux) executors,
       // without depending on the container having `grep` installed.
@@ -152,14 +193,18 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
         let content: string;
         try {
           const buf = await executor.readFile(handle, posixPath.join(root, fileRel));
+          if (buf.length > READ_MAX_BYTES) return true; // skip huge files
           content = buf.toString("utf8");
         } catch {
           return true;
         }
         const lines = content.split(/\r?\n/);
         for (let i = 0; i < lines.length; i++) {
-          if (matcher(lines[i] ?? "")) {
-            output.push(`${fileRel}:${i + 1}:${lines[i]}`);
+          const raw = lines[i] ?? "";
+          // Truncate BEFORE the regex: bounded input bounds backtracking.
+          const line = raw.length > GREP_MAX_LINE_CHARS ? raw.slice(0, GREP_MAX_LINE_CHARS) : raw;
+          if (matcher(line)) {
+            output.push(`${fileRel}:${i + 1}:${line}`);
             matchCount++;
             if (matchCount >= limit) return false;
           }
@@ -189,10 +234,6 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
 
 export type ToolsService = ReturnType<typeof createToolsService>;
 
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
 /** Build a per-line matcher function from grep-style parameters. */
 function buildLineMatcher(pattern: string, literal: boolean | undefined, ignoreCase: boolean | undefined) {
   if (literal) {
@@ -218,17 +259,21 @@ function globMatches(s: string, pattern: string): boolean {
   return re.test(s);
 }
 
-/** Walk files under `root` (relative paths), invoking `visit`. Return false to stop. */
+/** Walk files under `root` (relative paths), invoking `visit`. Return false to stop.
+ *  Bounded by WALK_MAX_FILES / WALK_MAX_DEPTH so a deep or huge tree cannot
+ *  drive unbounded serial executor round-trips (each stat/readdir is a remote
+ *  call on the SSH executor). */
 async function walkFiles(
   executor: SandboxExecutor,
   handle: ContainerHandle,
   root: string,
   visit: (rel: string) => Promise<boolean>,
 ): Promise<void> {
-  const queue: Array<{ dir: string; rel: string }> = [{ dir: root, rel: "" }];
+  const queue: Array<{ dir: string; rel: string; depth: number }> = [{ dir: root, rel: "", depth: 0 }];
   const visited = new Set<string>();
+  let files = 0;
   while (queue.length > 0) {
-    const { dir, rel } = queue.shift()!;
+    const { dir, rel, depth } = queue.shift()!;
     let names: string[];
     try {
       names = await executor.readdir(handle, dir);
@@ -249,8 +294,12 @@ async function walkFiles(
         continue;
       }
       if (isDir) {
-        queue.push({ dir: childAbs, rel: childRel });
+        if (depth + 1 <= WALK_MAX_DEPTH) {
+          queue.push({ dir: childAbs, rel: childRel, depth: depth + 1 });
+        }
       } else {
+        files += 1;
+        if (files > WALK_MAX_FILES) return;
         if (!(await visit(childRel))) return;
       }
     }

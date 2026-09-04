@@ -6,7 +6,7 @@
  * refresh token.
  */
 import type { Database } from "../db/driver.ts";
-import { verifyPassword, validatePasswordPolicy } from "../auth/password.ts";
+import { verifyPassword, validatePasswordPolicy, hashPassword } from "../auth/password.ts";
 import {
   signAccessToken,
   signRefreshToken,
@@ -33,6 +33,16 @@ const ACCESS_LIFETIMES: Record<string, number> = {
 
 export function createAuthService(db: Database) {
   const users = createUserService(db);
+
+  // Constant-work comparison for the user-not-found path: skipping bcrypt
+  // there made login timing an efficient username-enumeration oracle.
+  const DUMMY_HASH = "$2b$12$C6UzMDM.H6dfI/f/IKcEe.6uMHzbnT.a0PrE5AaQxH9Zmi0RSdwO.";
+
+  async function verifyPasswordConstantTime(password: string, hash: string | null): Promise<boolean> {
+    if (hash) return verifyPassword(password, hash);
+    await verifyPassword(password, DUMMY_HASH).catch(() => false);
+    return false;
+  }
 
   function accessLifetimeSeconds(): number {
     // Parse "15m"/"2h"/"90s" generically.
@@ -66,6 +76,7 @@ export function createAuthService(db: Database) {
         username: user.username,
         role: user.role,
         mustChangePassword: Number(user.must_change_password) === 1 || user.must_change_password === true,
+        tokenVersion: Number(user.token_version) || 0,
       }),
       refreshToken,
       expiresIn: ACCESS_LIFETIMES[process.env.JWT_ACCESS_TTL ?? "15m"] ?? accessLifetimeSeconds(),
@@ -75,12 +86,16 @@ export function createAuthService(db: Database) {
   return {
     async login(username: string, password: string, clientIp?: string): Promise<TokenPair & { user: UserRow }> {
       const user = await users.getByUsername(username);
-      if (!user) throw new UnauthorizedError("Invalid username or password");
+      if (!user) {
+        // Same bcrypt work as the found-user path (timing; see helper above).
+        await verifyPasswordConstantTime(password, null);
+        throw new UnauthorizedError("Invalid username or password");
+      }
       if (user.status === "pending") throw new AccountPendingError();
       if (user.status === "disabled") {
         throw new HttpError(403, "ACCOUNT_DISABLED", "Account is disabled");
       }
-      const ok = await verifyPassword(password, user.password_hash);
+      const ok = await verifyPasswordConstantTime(password, user.password_hash);
       if (!ok) throw new UnauthorizedError("Invalid username or password");
       await users.touchLogin(user.id);
       const pair = await issueTokenPair(user, clientIp);

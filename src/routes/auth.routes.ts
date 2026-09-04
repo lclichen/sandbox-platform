@@ -19,6 +19,7 @@ import { createUserService, toPublic } from "../services/user.service.ts";
 import { createApiKeyService } from "../services/apikey.service.ts";
 import { validatePasswordPolicy } from "../auth/password.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
+import { changePasswordLimiter } from "../middleware/rate-limit.ts";
 import { BadRequestError } from "../utils/errors.ts";
 import { loginSchema, refreshSchema, registerSchema, changePasswordSchema, idParamSchema } from "./schemas/common.ts";
 import { validate } from "./validate.ts";
@@ -95,7 +96,9 @@ export function authRouter(): Router {
 
   // R9: self-service password change; also the exit path for accounts flagged
   // must_change_password (the flag gates all other endpoints via requireAuth).
-  router.post("/change-password", requireAuth(), (req, res, next) => {
+  // Limited: an attacker holding a live token can brute-force currentPassword
+  // to recover the (often reused) plaintext.
+  router.post("/change-password", requireAuth(), changePasswordLimiter(), (req, res, next) => {
     const body = validate(changePasswordSchema, req.body);
     createAuthService(getDb(req))
       .changePassword(currentUserId(req), body.currentPassword, body.newPassword)

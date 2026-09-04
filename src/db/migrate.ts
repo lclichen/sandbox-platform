@@ -27,6 +27,7 @@ export interface Migration {
 // at the baseline without re-running it (identical end state).
 const migrationModules: Array<{ id: string; module: string }> = [
   { id: "0001_baseline", module: "./migrations/0001_baseline.ts" },
+  { id: "0002_token_version", module: "./migrations/0002_token_version.ts" },
 ];
 
 /** The former incremental chain — kept only to recognize already-migrated

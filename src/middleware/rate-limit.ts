@@ -57,6 +57,15 @@ export function llmRevealLimiter(): RequestHandler {
 }
 
 /**
+ * C9: change-password is an authenticated currentPassword brute-force surface
+ * (a stolen access token guessing the victim's reused password in plaintext).
+ */
+export function changePasswordLimiter(): RequestHandler {
+  const c = loadConfig();
+  return c.rateLimit.enabled ? limiter(60_000, 5) : noop();
+}
+
+/**
  * R1: self-registration abuse guard. Tighter than login — a public write
  * endpoint that mints accounts must not be hammerable. The captcha hook is
  * deliberately left as a future extension point (see requirements doc R9).

@@ -166,10 +166,12 @@ export function createUserService(db: Database) {
       const current = await this.getById(id);
       if (!current) throw new NotFoundError("User", id);
       const passwordHash = await hashPassword(newPassword);
+      // token_version bump: every outstanding access token (claim tv) dies on
+      // its next request — self-change AND admin reset both flow through here.
       await db.run(
         clearMustChange
-          ? "UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-          : "UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          ? "UPDATE users SET password_hash = ?, must_change_password = 0, token_version = token_version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+          : "UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         passwordHash,
         id,
       );

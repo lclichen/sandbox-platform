@@ -190,11 +190,41 @@ export function usersRouter(): Router {
   router.patch("/:id", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const body = validate(updateUserSchema, req.body);
-    const users = createUserService(getDb(req));
-    users
-      .update(id, body)
-      .then((user) => res.json(toPublic(user)))
-      .catch(next);
+    const db = getDb(req);
+    const users = createUserService(db);
+    const requester = (req as AuthedRequest).user!;
+    (async () => {
+      const target = await users.getById(id);
+      if (!target) {
+        res.status(404).json({ code: "NOT_FOUND", message: `User ${id} not found` });
+        return;
+      }
+      // Self-protection: an admin editing their own role/status can lock the
+      // platform out of its last management account.
+      const demotes = body.role !== undefined && body.role !== target.role;
+      const disables = body.status !== undefined && body.status !== "active" && target.status === "active";
+      if ((demotes || disables) && target.role === "admin") {
+        if (id === requester.sub) {
+          res.status(400).json({
+            code: "BAD_REQUEST",
+            message: "Admins cannot change their own role or disable themselves",
+          });
+          return;
+        }
+        const activeAdmins = await db.get<{ n: number }>(
+          "SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND status = 'active'",
+        );
+        if (Number(activeAdmins?.n ?? 0) <= 1) {
+          res.status(409).json({
+            code: "LAST_ADMIN",
+            message: "Cannot demote or disable the last active admin",
+          });
+          return;
+        }
+      }
+      const user = await users.update(id, body);
+      res.json(toPublic(user));
+    })().catch(next);
   });
 
   router.post("/:id/password", (req, res, next) => {
@@ -205,10 +235,20 @@ export function usersRouter(): Router {
       next(new BadRequestError(violation));
       return;
     }
-    const users = createUserService(getDb(req));
+    const db = getDb(req);
+    const users = createUserService(db);
     users
       .setPassword(id, body.password)
-      .then(() => res.status(204).end())
+      .then(async () => {
+        // A reset that leaves the old sessions alive is theater: the target's
+        // 7-day refresh tokens would keep working. setPassword already bumped
+        // token_version (kills access tokens via the middleware check).
+        await db.run(
+          "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
+          id,
+        );
+        res.status(204).end();
+      })
       .catch(next);
   });
 

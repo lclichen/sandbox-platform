@@ -17,6 +17,9 @@ export interface AccessClaims {
   type: "access";
   /** R9: set while the account owes a password change; gates most endpoints. */
   pwd_change_required?: boolean;
+  /** C5: token_version of the owner at issue time. Bumping users.token_version
+   *  (password change/reset, disable) rejects every outstanding token. */
+  tv?: number;
 }
 
 export interface RefreshClaims {
@@ -32,12 +35,14 @@ export function signAccessToken(user: {
   username: string;
   role: "admin" | "user";
   mustChangePassword?: boolean;
+  tokenVersion?: number;
 }): string {
   const claims: AccessClaims = {
     sub: user.id,
     username: user.username,
     role: user.role,
     type: "access",
+    tv: user.tokenVersion ?? 0,
     ...(user.mustChangePassword ? { pwd_change_required: true } : {}),
   };
   return jwt.sign(claims, config.auth.jwtSecret, { expiresIn: config.auth.accessTtl });
@@ -49,7 +54,9 @@ export function signRefreshToken(userId: number, jti: string): string {
 }
 
 export function verifyToken<T = unknown>(token: string): T {
-  return jwt.verify(token, config.auth.jwtSecret) as T;
+  // Pin the algorithm: an unpinned verify accepts any HS* variant and would
+  // follow future library defaults.
+  return jwt.verify(token, config.auth.jwtSecret, { algorithms: ["HS256"] }) as T;
 }
 
 /** SHA-256 hash of a token for storage (refresh tokens only). */

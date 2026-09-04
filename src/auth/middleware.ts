@@ -98,6 +98,19 @@ export function requireAuth(): RequestHandler {
           return next(new UnauthorizedError("Invalid or expired token"));
         }
         if (claims.type !== "access") return next(new UnauthorizedError("Wrong token type"));
+        // C5: live re-check against the user row. A JWT otherwise stays valid
+        // for its whole TTL even after the account is disabled or its password
+        // changed/reset — token_version comparison kills those tokens on their
+        // next request, and the row's status disables accounts immediately.
+        const row = await createUserService(getDb(req)).getById(claims.sub);
+        if (!row || row.status !== "active") {
+          return next(new UnauthorizedError("Account is no longer active"));
+        }
+        if ((claims.tv ?? 0) !== (Number(row.token_version) || 0)) {
+          return next(new UnauthorizedError("Token superseded by a credential change; log in again"));
+        }
+        const owesChange = Number(row.must_change_password) === 1 || row.must_change_password === true;
+        if (owesChange && !claims.pwd_change_required) claims.pwd_change_required = true;
       }
 
       // R9: while must_change_password is set, the account may only reach the

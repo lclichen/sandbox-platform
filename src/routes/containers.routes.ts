@@ -27,6 +27,7 @@ import { createContainerService } from "../services/container.service.ts";
 import { createWorkspaceService } from "../services/workspace.service.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
 import { UnauthorizedError } from "../utils/errors.ts";
+import { issuePtyTicket } from "../services/pty-tickets.ts";
 import {
   createContainerSchema,
   listContainersSchema,
@@ -234,6 +235,26 @@ export function containersRouter(): Router {
         // traffic is accounted by the tools bash/stream session.
         void svc.closeSession(sessionId, 0, 0).catch(() => {
           /* best-effort */
+        });
+      })
+      .catch(next);
+  });
+
+  // R2/C3: mint a single-use, 60s ticket for the PTY WebSocket. Ownership and
+  // running state are checked HERE with the caller's real credential; the WS
+  // upgrade then only accepts the ticket (no long-lived secret in the URL).
+  router.post("/:id/pty/ticket", (req, res, next) => {
+    const { id } = validate(idParamSchema, req.params);
+    const a = actor(req);
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
+    svc
+      .resolveRunningHandle(id, a.id, a.isAdmin)
+      .then(() => {
+        const issued = issuePtyTicket(a.id, a.isAdmin ? "admin" : "user", id);
+        res.status(201).json({
+          ticket: issued.ticket,
+          expiresAt: new Date(issued.expiresAt).toISOString(),
+          wsPath: `/api/v1/containers/${id}/pty?ticket=${encodeURIComponent(issued.ticket)}`,
         });
       })
       .catch(next);

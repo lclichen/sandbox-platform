@@ -24,10 +24,8 @@ interface Frame {
   code?: number | null;
 }
 
-function connect(token: string | undefined, containerId: number): Promise<{ ws: WebSocket; frames: Frame[] }> {
-  const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/v1/containers/${containerId}/pty${
-    token ? `?token=${encodeURIComponent(token)}` : ""
-  }`;
+function connectRaw(query: string, containerId: number): Promise<{ ws: WebSocket; frames: Frame[] }> {
+  const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}/api/v1/containers/${containerId}/pty${query}`;
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const frames: Frame[] = [];
@@ -42,6 +40,25 @@ function connect(token: string | undefined, containerId: number): Promise<{ ws: 
       );
     });
   });
+}
+
+/** Mint a one-time ticket over the REST route (ownership checks happen here). */
+async function mintTicket(token: string, containerId: number): Promise<{ ticket: string; wsPath: string }> {
+  const res = await ctx
+    .request()
+    .post(`/api/v1/containers/${containerId}/pty/ticket`)
+    .set("Authorization", `Bearer ${token}`);
+  if (res.status !== 201) {
+    throw Object.assign(new Error(`ticket mint failed: ${res.status} ${JSON.stringify(res.body)}`), {
+      statusCode: res.status,
+    });
+  }
+  return { ticket: res.body.ticket as string, wsPath: res.body.wsPath as string };
+}
+
+async function connect(token: string, containerId: number): Promise<{ ws: WebSocket; frames: Frame[] }> {
+  const { ticket } = await mintTicket(token, containerId);
+  return connectRaw(`?ticket=${encodeURIComponent(ticket)}`, containerId);
 }
 
 /** Wait for the frame at index `from` to arrive (frames arrive in order). */
@@ -126,17 +143,41 @@ describe("R2 PTY WebSocket", () => {
     await new Promise<void>((resolve) => ws.on("close", () => resolve()));
   });
 
-  it("rejects upgrades without a token (401)", async () => {
+  it("rejects upgrades without a ticket (401) and refuses legacy ?token= (410)", async () => {
     const token = await createUserAndLogin(ctx, "ptyanon");
     const containerId = await createRunningContainer(token);
-    await expect(connect(undefined, containerId)).rejects.toMatchObject({ statusCode: 401 });
+    await expect(connectRaw("", containerId)).rejects.toMatchObject({ statusCode: 401 });
+    await expect(
+      connectRaw(`?token=${encodeURIComponent(token)}`, containerId),
+    ).rejects.toMatchObject({ statusCode: 410 });
   });
 
-  it("hides other users' containers (404)", async () => {
+  it("tickets are single-use and container-bound", async () => {
+    const owner = await createUserAndLogin(ctx, "ptyticket");
+    const first = await createRunningContainer(owner);
+    const other = await createRunningContainer(owner);
+    const { ticket } = await mintTicket(owner, first);
+    // First use consumes the ticket...
+    const opened = await connectRaw(`?ticket=${encodeURIComponent(ticket)}`, first);
+    await frameAt(opened.frames, 0); // ready
+    opened.ws.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // ...so a replay of the SAME ticket is rejected.
+    await expect(
+      connectRaw(`?ticket=${encodeURIComponent(ticket)}`, first),
+    ).rejects.toMatchObject({ statusCode: 401 });
+    // A ticket minted for container `other` cannot open container `first`.
+    const { ticket: ticketB } = await mintTicket(owner, other);
+    await expect(
+      connectRaw(`?ticket=${encodeURIComponent(ticketB)}`, first),
+    ).rejects.toMatchObject({ statusCode: 401 });
+  });
+
+  it("hides other users' containers (404 at ticket mint)", async () => {
     const owner = await createUserAndLogin(ctx, "ptyowner");
     const containerId = await createRunningContainer(owner);
     const stranger = await createUserAndLogin(ctx, "ptystranger");
-    await expect(connect(stranger, containerId)).rejects.toMatchObject({ statusCode: 404 });
+    await expect(mintTicket(stranger, containerId)).rejects.toMatchObject({ statusCode: 404 });
   });
 
   it("refuses terminals on non-running containers (409)", async () => {

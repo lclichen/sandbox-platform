@@ -1,5 +1,5 @@
 /**
- * PTY WebSocket bridge (R2): GET /api/v1/containers/:id/pty?token=<credential>
+ * PTY WebSocket bridge (R2): GET /api/v1/containers/:id/pty?ticket=<one-time>
  *
  * Bridges a browser/pi-web xterm frontend onto an interactive shell inside the
  * owner's container. Owner isolation reuses container.service.requireOwned
@@ -9,18 +9,22 @@
  *   server -> client: {type:"ready"} | {type:"output", data} | {type:"exit", code}
  *   client -> server: {type:"input", data} | {type:"resize", cols, rows}
  *
+ * Auth (fix plan C3): clients first call
+ *   POST /api/v1/containers/:id/pty/ticket (Authorization header, ownership
+ * checked) which mints a single-use 60s ticket; the WS upgrade accepts ONLY
+ * `?ticket=`. Long-lived credentials no longer travel in URLs (proxy logs,
+ * browser history). The legacy `?token=` is rejected with 410.
+ *
  * Limits (env-configurable):
  *   - PTY_MAX_PER_CONTAINER concurrent sessions per container (default 3);
  *     excess upgrades are refused with HTTP 429.
  *   - PTY_IDLE_TIMEOUT_MINUTES: sessions with no client traffic for this long
  *     are killed (default 30). Server pings every 30s also detect dead peers.
+ *   - 1 MiB max frame size, per-second and per-session input byte budgets:
+ *     a flood of input frames cannot balloon memory or CPU.
  *
  * Every connection is recorded in the `sessions` audit table (openSession /
  * closeSession with byte counters), matching the SSE bash/stream accounting.
- *
- * Auth note: browsers cannot set headers on WebSocket upgrades, hence the
- * `token` query parameter (JWT access token or `sk_` API key). Deployments
- * should keep WS URLs out of access logs (see docs/DEPLOYMENT.md).
  */
 import type { Server as HttpServer, IncomingMessage } from "node:http";
 import { STATUS_CODES } from "node:http";
@@ -29,7 +33,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Database } from "../db/driver.ts";
 import type { SandboxExecutor } from "../executors/types.ts";
 import { createContainerService } from "../services/container.service.ts";
-import { authenticateCredential } from "../auth/middleware.ts";
+import { consumePtyTicket } from "../services/pty-tickets.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
 
@@ -67,7 +71,9 @@ interface ClientFrame {
  */
 export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { close(): void } {
   const { db, executor } = deps;
-  const wss = new WebSocketServer({ noServer: true });
+  // maxPayload: input frames are tiny keystrokes/pastes; anything bigger is
+  // abuse (default ws cap is 100 MiB per frame → straight to JSON.parse).
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
   const openPerContainer = new Map<number, number>();
 
   const increment = (containerId: number): number => {
@@ -94,18 +100,22 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { clos
         return;
       }
       const containerId = Number(match[1]);
-      const token = url.searchParams.get("token");
-      if (!token) {
-        rejectHttp(socket, 401, "UNAUTHORIZED", "Missing ?token= credential");
+      const legacyToken = url.searchParams.get("token");
+      if (legacyToken) {
+        rejectHttp(
+          socket,
+          410,
+          "TOKEN_AUTH_REMOVED",
+          "Long-lived credentials are no longer accepted on the WS URL. POST /api/v1/containers/:id/pty/ticket first, then connect with ?ticket=",
+        );
         return;
       }
-      const claims = await authenticateCredential(db, token);
+      const ticket = url.searchParams.get("ticket");
+      // consumePtyTicket is single-use and container-bound; a stolen ticket is
+      // worthless within 60s and reveals nothing about the account.
+      const claims = ticket ? consumePtyTicket(ticket, containerId) : null;
       if (!claims) {
-        rejectHttp(socket, 401, "UNAUTHORIZED", "Invalid or expired credential");
-        return;
-      }
-      if (claims.pwd_change_required) {
-        rejectHttp(socket, 403, "PASSWORD_CHANGE_REQUIRED", "Password change required");
+        rejectHttp(socket, 401, "UNAUTHORIZED", "Missing, invalid, expired or already-used ?ticket= (POST /containers/:id/pty/ticket first)");
         return;
       }
 
@@ -114,7 +124,7 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { clos
       let row: Awaited<ReturnType<typeof svc.resolveRunningHandle>>["row"];
       try {
         // requireOwned semantics (404 for non-owners) + running check in one call.
-        const resolved = await svc.resolveRunningHandle(containerId, claims.sub, claims.role === "admin");
+        const resolved = await svc.resolveRunningHandle(containerId, claims.userId, claims.role === "admin");
         row = resolved.row;
       } catch (err) {
         const status = (err as { status?: number }).status ?? 500;
@@ -196,6 +206,22 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { clos
     let bytesOut = 0;
     let settled = false;
     let lastActivity = Date.now();
+
+    // Input budgets: keystrokes are tiny; sustained high-volume input is
+    // paste-flooding at best and memory/CPU abuse at worst.
+    const INPUT_BYTES_PER_SECOND = 256 * 1024;
+    const INPUT_BYTES_TOTAL = 100 * 1024 * 1024;
+    let inputWindowStart = 0;
+    let inputWindowBytes = 0;
+    const inputAllowed = (n: number): boolean => {
+      const now = Date.now();
+      if (now - inputWindowStart >= 1000) {
+        inputWindowStart = now;
+        inputWindowBytes = 0;
+      }
+      inputWindowBytes += n;
+      return inputWindowBytes <= INPUT_BYTES_PER_SECOND && bytesIn + n <= INPUT_BYTES_TOTAL;
+    };
 
     const settle = (reason: string) => {
       if (settled) return;
@@ -294,7 +320,12 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { clos
       switch (frame.type) {
         case "input":
           if (typeof frame.data === "string") {
-            bytesIn += Buffer.byteLength(frame.data);
+            const size = Buffer.byteLength(frame.data);
+            if (!inputAllowed(size)) {
+              ws.close(4429, "input rate exceeded");
+              return;
+            }
+            bytesIn += size;
             pty?.write(frame.data);
           }
           break;
