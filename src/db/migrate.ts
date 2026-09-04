@@ -22,14 +22,24 @@ export interface Migration {
 }
 
 // Imported dynamically below. Paths use explicit .ts so --experimental-transform-types resolves them.
+// The chain was squashed (0001..0006 → 0001_baseline): fresh databases run the
+// single baseline; databases that already ran the full former chain are marked
+// at the baseline without re-running it (identical end state).
 const migrationModules: Array<{ id: string; module: string }> = [
-  { id: "0001_schema", module: "./migrations/0001_schema.ts" },
-  { id: "0002_seed", module: "./migrations/0002_seed.ts" },
-  { id: "0003_pi_web_integration", module: "./migrations/0003_pi_web_integration.ts" },
-  { id: "0004_remove_demo_images", module: "./migrations/0004_remove_demo_images.ts" },
-  { id: "0005_snapshot_decouple", module: "./migrations/0005_snapshot_decouple.ts" },
-  { id: "0006_image_max_per_user", module: "./migrations/0006_image_max_per_user.ts" },
+  { id: "0001_baseline", module: "./migrations/0001_baseline.ts" },
 ];
+
+/** The former incremental chain — kept only to recognize already-migrated
+ *  deployments (see runMigrations); no module is loaded for these ids. */
+const LEGACY_MIGRATION_IDS = [
+  "0001_schema",
+  "0002_seed",
+  "0003_pi_web_integration",
+  "0004_remove_demo_images",
+  "0005_snapshot_decouple",
+  "0006_image_max_per_user",
+];
+const BASELINE_ID = "0001_baseline";
 
 async function ensureSchemaMigrationsTable(db: Database): Promise<void> {
   if (db.dialect === "sqlite") {
@@ -57,6 +67,27 @@ async function listApplied(db: Database): Promise<Set<string>> {
 export async function runMigrations(db: Database): Promise<string[]> {
   await ensureSchemaMigrationsTable(db);
   const applied = await listApplied(db);
+
+  // Legacy-chain recognition: a database that ran the FULL former chain is at
+  // the same end state as the squashed baseline — record the baseline as
+  // applied without re-running it. A PARTIAL legacy chain (stopped on an old
+  // release) cannot be advanced by this code: its pending increments no
+  // exist. Fail loudly with the remedy instead of silently re-baselining a
+  // half-migrated schema.
+  const legacyApplied = LEGACY_MIGRATION_IDS.filter((id) => applied.has(id));
+  if (legacyApplied.length > 0) {
+    if (legacyApplied.length !== LEGACY_MIGRATION_IDS.length) {
+      throw new Error(
+        `数据库停留在旧迁移链的中间状态（已应用 ${legacyApplied.length}/${LEGACY_MIGRATION_IDS.length}: ${legacyApplied.join(", ")}）。` +
+        "请先用上一版本代码完成一次启动（应用全部旧迁移），或导出数据后在全新数据库上重新初始化。",
+      );
+    }
+    if (!applied.has(BASELINE_ID)) {
+      await db.run("INSERT INTO schema_migrations (id) VALUES (?)", BASELINE_ID);
+      applied.add(BASELINE_ID);
+    }
+  }
+
   const pending = migrationModules.filter((m) => !applied.has(m.id));
   const appliedNow: string[] = [];
 

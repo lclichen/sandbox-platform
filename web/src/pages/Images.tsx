@@ -43,7 +43,7 @@ function draftFromImage(img: ImageRow): Draft {
     max_per_user: img.max_per_user != null ? String(img.max_per_user) : "",
     cpu: String(img.default_resources?.cpu ?? 1),
     memoryMb: String(img.default_resources?.memoryMb ?? 1024),
-    diskGb: String(img.default_resources?.diskGb ?? 5),
+    diskGb: String(img.default_resources?.diskGb ?? 1),
   };
 }
 
@@ -207,7 +207,7 @@ function ImageModal({
         default_resources: {
           cpu: Number(draft.cpu) || 1,
           memoryMb: Number(draft.memoryMb) || 1024,
-          diskGb: Number(draft.diskGb) || 5,
+          diskGb: Number(draft.diskGb) || 1,
         },
       };
       if (image) {
