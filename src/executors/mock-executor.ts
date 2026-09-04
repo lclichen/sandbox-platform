@@ -211,10 +211,13 @@ export class MockExecutor implements SandboxExecutor {
       : ["-c", command];
     // The handle passed in by tools.service is rebuilt from a DB row (no env);
     // recover the create-time env from the internal map where the mock keeps
-    // the authoritative handle. Layer: process < stored handle env < per-cmd opts.
+    // the authoritative handle. Layer: safe process subset < stored handle env
+    // < per-cmd opts. NEVER spread process.env wholesale — mock commands are
+    // user-driven shells on the platform host, and the platform process env
+    // carries JWT_SECRET / SSH_PASSWORD / LITELLM_MASTER_KEY.
     const stored = this.handles.get(handle.id);
     const handleEnv = handle.env ?? stored?.env;
-    const mergedEnv = { ...process.env, ...(handleEnv ?? {}), ...(opts.env ?? {}) };
+    const mergedEnv = { ...safeProcessEnvForMock(), ...(handleEnv ?? {}), ...(opts.env ?? {}) };
     return new Promise((resolveFn) => {
       const child = spawn(shell, shellArgs, {
         cwd,
@@ -398,4 +401,47 @@ function resolveShell(): string {
   const comSpec = process.env.ComSpec;
   if (comSpec && comSpec.trim()) return comSpec;
   return "cmd.exe";
+}
+
+/**
+ * Minimal, non-secret process env for mock "container" shells: enough for the
+ * shell and coreutils to run (PATH lookup, temp dirs, locale), nothing more.
+ * The full process.env is off-limits — it contains the platform's own
+ * JWT_SECRET / DB credentials / SSH password / LITELLM master key, and mock
+ * commands are user-controlled (`env` would print them all).
+ */
+const MOCK_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "TMP",
+  "TEMP",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TZ",
+  "TERM",
+  "USER",
+  "USERNAME",
+  "USERPROFILE",
+  "SystemRoot",
+  "SYSTEMROOT",
+  "SystemDrive",
+  "SYSTEMDRIVE",
+  "ComSpec",
+  "COMSPEC",
+  "windir",
+  "WINDIR",
+  "PATHEXT",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+];
+
+export function safeProcessEnvForMock(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of MOCK_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
 }

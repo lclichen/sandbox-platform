@@ -45,6 +45,15 @@ export async function setupTestApp(): Promise<TestContext> {
   // content-sensitive assertions like the R5 tree tests).
   const prevWsBase = process.env.WORKSPACE_BASE_DIR;
   process.env.WORKSPACE_BASE_DIR = join(tmpDir, "ws");
+  // Tests hammer login/register endpoints; rate limiting is covered by its
+  // own dedicated test file with explicit configuration (which sets
+  // RATE_LIMIT_ENABLED itself before calling us — respect that).
+  const injectedRateLimit = process.env.RATE_LIMIT_ENABLED === undefined;
+  if (injectedRateLimit) process.env.RATE_LIMIT_ENABLED = "false";
+  // A non-default seed password: seeding with the well-known default now puts
+  // the admin behind the R9 must-change-password gate (login → 403).
+  const prevSeedPw = process.env.SEED_ADMIN_PASSWORD;
+  process.env.SEED_ADMIN_PASSWORD = "TestAdminPass-9x";
   resetConfigForTesting();
 
   const db = await createDatabase({ sqlitePath: dbPath });
@@ -62,10 +71,13 @@ export async function setupTestApp(): Promise<TestContext> {
     db,
     tmpDir,
     request: () => request(app),
-    admin: { username: "admin", password: "changeme123" },
+    admin: { username: "admin", password: "TestAdminPass-9x" },
     restoreWsBase: () => {
       if (prevWsBase === undefined) delete process.env.WORKSPACE_BASE_DIR;
       else process.env.WORKSPACE_BASE_DIR = prevWsBase;
+      if (injectedRateLimit) delete process.env.RATE_LIMIT_ENABLED;
+      if (prevSeedPw === undefined) delete process.env.SEED_ADMIN_PASSWORD;
+      else process.env.SEED_ADMIN_PASSWORD = prevSeedPw;
       resetConfigForTesting();
     },
   };

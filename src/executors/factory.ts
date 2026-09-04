@@ -1,9 +1,20 @@
 /**
  * Executor factory.
  *
- * Selects the configured executor and, if the first choice is unavailable at
- * startup, falls back through a preference chain: ssh -> apptainer-cli -> mock.
- * The chosen executor is cached as a singleton for the process lifetime.
+ * Selects the configured executor, cached as a singleton for the process
+ * lifetime. Selection is FAIL-CLOSED:
+ *
+ *  - EXECUTOR_KIND=ssh | apptainer-cli — that executor, or startup fails.
+ *  - EXECUTOR_KIND=auto (default) — probe ssh (when SSH_HOST is configured),
+ *    then apptainer-cli; if neither is usable, startup fails with guidance.
+ *  - EXECUTOR_KIND=mock — accepted explicitly (local dev/tests on machines
+ *    without a container runtime). It executes shells on the platform host,
+ *    so it is never reached implicitly and never allowed in production
+ *    (see assertSecureProductionConfig).
+ *
+ * The old behavior — silently degrading to MockExecutor whenever nothing else
+ * probed OK — turned a misconfigured production host into an unisolated one
+ * that still reported "healthy". That path is deliberately gone.
  */
 import type { SandboxExecutor, ExecutorKind } from "./types.ts";
 import { MockExecutor } from "./mock-executor.ts";
@@ -12,25 +23,21 @@ import { ApptainerCliExecutor } from "./apptainer-cli-executor.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
 
-const FALLBACK_CHAIN: ExecutorKind[] = ["ssh", "apptainer-cli", "mock"];
-
 let cached: SandboxExecutor | undefined;
+
+function resolveOrder(config: ReturnType<typeof loadConfig>): ExecutorKind[] {
+  const preferred = config.executor.kind;
+  if (preferred !== "auto") return [preferred];
+  // auto: real executors only, most-managed first.
+  return config.executor.ssh.host ? ["ssh", "apptainer-cli"] : ["apptainer-cli"];
+}
 
 export async function getExecutor(): Promise<SandboxExecutor> {
   if (cached) return cached;
 
   const config = loadConfig();
-  const preferred = config.executor.kind;
-
-  // In production the fallback chain must NEVER land on the mock executor
-  // silently: it "creates" containers as plain host directories and reports
-  // success — a dangerous degradation that looks like a working deployment.
-  const allowMock =
-    preferred === "mock" || config.nodeEnv !== "production";
-
-  // Try the configured executor first, then walk the fallback chain.
-  const chain = allowMock ? FALLBACK_CHAIN : FALLBACK_CHAIN.filter((k) => k !== "mock");
-  const order: ExecutorKind[] = [preferred, ...chain.filter((k) => k !== preferred)];
+  const order = resolveOrder(config);
+  const failures: string[] = [];
 
   for (const kind of order) {
     const candidate = createExecutor(kind);
@@ -41,22 +48,19 @@ export async function getExecutor(): Promise<SandboxExecutor> {
         cached = candidate;
         return candidate;
       }
+      failures.push(`${kind}: unavailable`);
       logger.info({ kind, reason: "unavailable" }, "Executor skipped.");
     } catch (err) {
+      failures.push(`${kind}: ${(err as Error).message}`);
       logger.warn({ kind, error: (err as Error).message }, "Executor probe failed; skipping.");
     }
   }
 
-  if (!allowMock) {
-    throw new Error(
-      `EXECUTOR_KIND=${preferred} 不可用（探测失败），且生产环境禁止回退到 mock 执行器。请检查 apptainer/ssh 配置后重启。`,
-    );
-  }
-
-  // Dev/demo only: MockExecutor is always available as a last resort.
-  logger.warn("No executor available; falling back to MockExecutor unconditionally.");
-  cached = new MockExecutor();
-  return cached;
+  throw new Error(
+    `没有可用的沙盒执行器（EXECUTOR_KIND=${config.executor.kind}，尝试：${failures.join("; ")}）。` +
+      `mock 执行器在宿主机上直接运行用户命令、无任何隔离，必须显式指定：本地开发请在 .env 设置 EXECUTOR_KIND=mock，` +
+      `生产环境请配置 EXECUTOR_KIND=ssh（SSH_HOST 等）或 EXECUTOR_KIND=apptainer-cli 后重启。`,
+  );
 }
 
 function createExecutor(kind: ExecutorKind): SandboxExecutor {
@@ -67,6 +71,8 @@ function createExecutor(kind: ExecutorKind): SandboxExecutor {
       return new SshExecutor();
     case "apptainer-cli":
       return new ApptainerCliExecutor();
+    case "auto":
+      throw new Error("auto must be resolved to a concrete kind before createExecutor");
   }
 }
 

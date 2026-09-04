@@ -41,7 +41,7 @@ describe("rate limiting", () => {
   it("does not interfere with non-limited endpoints", async () => {
     // A single login stays under the threshold; the images listing itself is
     // not rate-limited.
-    const login = await ctx.request().post("/api/v1/auth/login").send({ username: "admin", password: "changeme123" });
+    const login = await ctx.request().post("/api/v1/auth/login").send({ username: "admin", password: "TestAdminPass-9x" });
     expect(login.status).toBe(200);
     const res = await ctx
       .request()

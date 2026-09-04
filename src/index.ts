@@ -17,6 +17,11 @@ async function main() {
   // Read-only data dirs (AppImage mount / package dir) must fail at boot, not
   // at the first workspace upload.
   assertWritableDataDirs(config);
+  if (config.auth.jwtSecretEphemeral) {
+    logger.warn(
+      "JWT_SECRET is unset — using a generated EPHEMERAL secret. All sessions/keys invalidate on every restart. Set JWT_SECRET (openssl rand -hex 32) for anything persistent.",
+    );
+  }
 
   // Process-level error capture: surface unhandled rejections / exceptions in
   // the structured log before the process exits (Node's default is to exit on

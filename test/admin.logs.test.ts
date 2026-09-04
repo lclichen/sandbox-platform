@@ -55,7 +55,7 @@ describe("audit logging", () => {
   it("records auth login attempts", async () => {
     ctx = await setupTestApp();
     // A successful admin login.
-    await ctx.request().post("/api/v1/auth/login").send({ username: "admin", password: "changeme123" });
+    await ctx.request().post("/api/v1/auth/login").send({ username: "admin", password: "TestAdminPass-9x" });
     // A failed login.
     await ctx.request().post("/api/v1/auth/login").send({ username: "admin", password: "wrong" });
 

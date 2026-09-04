@@ -365,13 +365,18 @@ export const up: Migration["up"] = async ({ db }) => {
   const quota = await db.get<{ id: number }>("SELECT id FROM resource_quotas WHERE name = 'admin'");
   if (!quota) throw new Error("admin quota tier missing; cannot seed admin user");
   const passwordHash = await bcrypt.hash(config.seed.adminPassword, 12);
+  // Seeding with the well-known default password still lets a fresh install
+  // boot locally — but the account lands behind the R9 forced-change gate so
+  // the known credential is never usable beyond the first password change.
+  const weakDefault = config.seed.adminPassword === "changeme123";
   await db.run(
-    `INSERT INTO users (username, password_hash, email, role, quota_id, status)
-     VALUES (?, ?, ?, 'admin', ?, 'active')`,
+    `INSERT INTO users (username, password_hash, email, role, quota_id, status, must_change_password)
+     VALUES (?, ?, ?, 'admin', ?, 'active', ?)`,
     config.seed.adminUsername,
     passwordHash,
     "admin@localhost",
     quota.id,
+    weakDefault ? 1 : 0,
   );
 
   // Demo images are opt-in (mock/demo stacks only): the sif paths point at

@@ -5,6 +5,7 @@
  * testable and free of scattered `process.env` reads.
  */
 import "dotenv/config";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve as pathResolve } from "node:path";
@@ -46,7 +47,7 @@ function bool(name: string, fallback: boolean): boolean {
 }
 
 export type DbDialect = "sqlite" | "postgresql";
-export type ExecutorKind = "mock" | "ssh" | "apptainer-cli";
+export type ExecutorKind = "mock" | "ssh" | "apptainer-cli" | "auto";
 export type RegisterMode = "off" | "open" | "approval";
 
 function asRegisterMode(value: string): RegisterMode {
@@ -60,8 +61,8 @@ function asDialect(value: string): DbDialect {
 }
 
 function asExecutorKind(value: string): ExecutorKind {
-  if (value === "mock" || value === "ssh" || value === "apptainer-cli") return value;
-  throw new Error(`Unsupported EXECUTOR_KIND: ${value}. Use "mock", "ssh", or "apptainer-cli".`);
+  if (value === "mock" || value === "ssh" || value === "apptainer-cli" || value === "auto") return value;
+  throw new Error(`Unsupported EXECUTOR_KIND: ${value}. Use "mock", "ssh", "apptainer-cli", or "auto".`);
 }
 
 export interface AppConfig {
@@ -70,8 +71,10 @@ export interface AppConfig {
   host: string;
   /** Number of reverse-proxy hops (0 = direct client). See rate-limit.ts. */
   trustProxy: number;
-  /** Optional bearer token guarding /metrics. Unset = open (dev only). */
+  /** Optional bearer token guarding /metrics. Unset = 503 unless metricsPublic. */
   metricsToken: string | undefined;
+  /** Explicitly expose /metrics without a token (METRICS_PUBLIC=on). */
+  metricsPublic: boolean;
   db: {
     dialect: DbDialect;
     sqlitePath: string;
@@ -79,6 +82,9 @@ export interface AppConfig {
   };
   auth: {
     jwtSecret: string;
+    /** True when JWT_SECRET was unset and an ephemeral random was generated
+     *  (dev convenience): tokens do not survive a restart in that mode. */
+    jwtSecretEphemeral: boolean;
     accessTtl: string;
     refreshTtl: string;
   };
@@ -183,19 +189,35 @@ let cached: AppConfig | undefined;
 export function loadConfig(): AppConfig {
   if (cached) return cached;
   const nodeEnv = required("NODE_ENV", "development");
+
+  // JWT secret: fail-closed. A KNOWN placeholder is refused in EVERY env —
+  // "development" is not evidence that a deployment is unreachable. Unset →
+  // generate an ephemeral random (tokens die on restart; fine for dev, and
+  // never a world-guessable key).
+  const jwtSecretRaw = optional("JWT_SECRET");
+  if (jwtSecretRaw && KNOWN_WEAK_JWT_SECRETS.has(jwtSecretRaw)) {
+    throw new Error(
+      "JWT_SECRET is set to a known insecure placeholder — refusing to start in any environment. " +
+      "Replace it in .env with: openssl rand -hex 32",
+    );
+  }
+  const jwtSecret = jwtSecretRaw ?? randomBytes(32).toString("hex");
+
   cached = {
     nodeEnv,
     port: int("PORT", 3000),
     host: required("HOST", "0.0.0.0"),
     trustProxy: int("TRUST_PROXY", 0),
     metricsToken: optional("METRICS_TOKEN"),
+    metricsPublic: bool("METRICS_PUBLIC", false),
     db: {
       dialect: asDialect(required("DB_DIALECT", "sqlite")),
       sqlitePath: resolveAppPath(required("DB_SQLITE_PATH", "./data/sandbox.db")),
       postgresUrl: optional("DATABASE_URL"),
     },
     auth: {
-      jwtSecret: required("JWT_SECRET", "dev-insecure-secret-change-me"),
+      jwtSecret,
+      jwtSecretEphemeral: !jwtSecretRaw,
       accessTtl: required("JWT_ACCESS_TTL", "15m"),
       refreshTtl: required("JWT_REFRESH_TTL", "7d"),
     },
@@ -211,9 +233,9 @@ export function loadConfig(): AppConfig {
       minLength: int("PASSWORD_MIN_LENGTH", 8),
       requireComplexity: bool("PASSWORD_REQUIRE_COMPLEXITY", false),
     },
-    // Brute-force / abuse protection is on by default in production.
+    // Brute-force / abuse protection defaults ON in every environment.
     rateLimit: {
-      enabled: bool("RATE_LIMIT_ENABLED", nodeEnv === "production"),
+      enabled: bool("RATE_LIMIT_ENABLED", true),
       loginPerMinute: int("RATE_LIMIT_LOGIN_PER_MINUTE", 10),
       refreshPerMinute: int("RATE_LIMIT_REFRESH_PER_MINUTE", 30),
       bashPerMinute: int("RATE_LIMIT_BASH_PER_MINUTE", 60),
@@ -221,7 +243,11 @@ export function loadConfig(): AppConfig {
       registerPerMinute: int("RATE_LIMIT_REGISTER_PER_MINUTE", 5),
     },
     executor: {
-      kind: asExecutorKind(required("EXECUTOR_KIND", "mock")),
+      // "auto" (the default) probes ssh → apptainer-cli and hard-fails when
+      // neither is configured; mock must be chosen EXPLICITLY. It used to be
+      // the silent default, which made a host-shell "container" the
+      // fail-open path for every misconfigured deployment.
+      kind: asExecutorKind(required("EXECUTOR_KIND", "auto")),
       ssh: {
         host: optional("SSH_HOST"),
         port: int("SSH_PORT", 22),
@@ -323,9 +349,9 @@ export function assertWritableDataDirs(config: AppConfig): void {
       rmSync(probeFile);
     } catch (err) {
       throw new Error(
-        `可写数据目录不可用: ${dir} (${envName})——只读文件系统或无权限。" +
-        "平台会在首次写入（如工作区上传/镜像导入）时失败，请把 ${envName} 指向可写目录后重启。" +
-        "原始错误: ${err instanceof Error ? err.message : String(err)}`,
+        `可写数据目录不可用: ${dir} (${envName})——只读文件系统或无权限。` +
+        `平台会在首次写入（如工作区上传/镜像导入）时失败，请把 ${envName} 指向可写目录后重启。` +
+        `原始错误: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -338,12 +364,21 @@ export function assertSecureProductionConfig(config: AppConfig): string[] {
     problems.push(
       "JWT_SECRET is set to a known insecure value. Generate one with: openssl rand -hex 32",
     );
+  } else if (config.auth.jwtSecretEphemeral) {
+    problems.push(
+      "JWT_SECRET is unset — an ephemeral random was generated, which logs everyone out on every restart. Set a persistent secret: openssl rand -hex 32",
+    );
   } else if (config.auth.jwtSecret.length < 32) {
     problems.push("JWT_SECRET is shorter than 32 characters; use: openssl rand -hex 32");
   }
   if (config.seed.adminPassword === INSECURE_DEFAULT_ADMIN_PASSWORD) {
     problems.push(
       "SEED_ADMIN_PASSWORD is set to the insecure default 'changeme123'. Set a strong password in .env.",
+    );
+  }
+  if (config.executor.kind === "mock") {
+    problems.push(
+      "EXECUTOR_KIND=mock executes user shells ON THE PLATFORM HOST (no isolation). Set EXECUTOR_KIND=ssh or apptainer-cli in production.",
     );
   }
   // LLM integration (optional). When enabled in production, both the LiteLLM

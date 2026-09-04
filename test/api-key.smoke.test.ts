@@ -40,7 +40,7 @@ describe("extension API-key + auto-create", () => {
     saveConfig({ url });
     const config = loadConfig(process.cwd());
     const client = new PlatformClient(config);
-    await client.login("admin", "changeme123");
+    await client.login("admin", "TestAdminPass-9x");
     const created = await client.createApiKey("ci");
     expect(created.key).toMatch(/^sk_[0-9a-f]{32}$/);
 
@@ -77,7 +77,7 @@ describe("extension API-key + auto-create", () => {
     const url = await startServer(ctx);
     saveConfig({ url });
     const client = new PlatformClient(loadConfig(process.cwd()));
-    await client.login("admin", "changeme123");
+    await client.login("admin", "TestAdminPass-9x");
     const created = await client.createApiKey("temp");
     client.config.token = undefined;
     client.config.refreshToken = undefined;

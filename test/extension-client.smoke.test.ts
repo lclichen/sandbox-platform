@@ -58,7 +58,7 @@ describe("pi-sandbox-extension client <-> platform", () => {
       const client = new PlatformClient(config);
 
       // Login as admin (seeded).
-      await client.login("admin", "changeme123");
+      await client.login("admin", "TestAdminPass-9x");
       const me = await client.me();
       expect(me.username).toBe("admin");
 
@@ -108,7 +108,7 @@ describe("pi-sandbox-extension client <-> platform", () => {
       saveConfig({ url });
       const config = loadConfig(process.cwd());
       const client = new PlatformClient(config);
-      await client.login("admin", "changeme123");
+      await client.login("admin", "TestAdminPass-9x");
 
       // Corrupt the access token to force a 401; the refresh path should kick in.
       config.token = "invalid.token.value";
@@ -133,7 +133,7 @@ describe("pi-sandbox-extension client <-> platform", () => {
       saveConfig({ url });
       const config = loadConfig(process.cwd());
       const client = new PlatformClient(config);
-      await client.login("admin", "changeme123");
+      await client.login("admin", "TestAdminPass-9x");
 
       const created = await client.createContainer({ imageId: 1, name: "stream-box" });
       await client.connectContainer(created.id);
@@ -183,7 +183,7 @@ describe("pi-sandbox-extension client <-> platform", () => {
       saveConfig({ url });
       const config = loadConfig(process.cwd());
       const client = new PlatformClient(config);
-      await client.login("admin", "changeme123");
+      await client.login("admin", "TestAdminPass-9x");
       const created = await client.createContainer({ imageId: 1, name: "bang-box" });
       await client.connectContainer(created.id);
 
@@ -217,7 +217,7 @@ describe("pi-sandbox-extension client <-> platform", () => {
       saveConfig({ url });
       const config = loadConfig(process.cwd());
       const client = new PlatformClient(config);
-      await client.login("admin", "changeme123");
+      await client.login("admin", "TestAdminPass-9x");
       const created = await client.createContainer({ imageId: 1, name: "path-box" });
       await client.connectContainer(created.id);
 

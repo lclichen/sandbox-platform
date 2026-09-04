@@ -69,10 +69,19 @@ constraints) lives in `docs/API-REFERENCE.md`; deployment in
 
 ```bash
 npm install --ignore-scripts
-cp .env.example .env            # adjust JWT_SECRET
-npm run migrate                 # creates schema + seeds admin/quotas/images
+cp .env.example .env
+# LOCAL DEV ONLY: pick the mock executor explicitly — it runs user shells on
+# the platform host with NO isolation (env scrubbed to a safe allowlist):
+#   EXECUTOR_KIND=mock  (already set in .env.example)
+npm run migrate                 # creates schema + seeds admin/quotas
 npm start                       # listens on http://0.0.0.0:3000
 ```
+
+Startup is fail-closed: `EXECUTOR_KIND` defaults to `auto` (probe ssh →
+apptainer-cli, otherwise refuse to start — never a silent mock), known-weak
+`JWT_SECRET` placeholders are refused in every environment, and seeding the
+admin with the default password lands the account behind the forced
+password-change gate.
 
 Smoke test:
 
@@ -95,12 +104,14 @@ export SSH_HOST=compute-node.corp.com
 export SSH_USERNAME=apptainer
 export SSH_PRIVATE_KEY_PATH=/etc/sandbox/ssh_key
 export JWT_SECRET=$(openssl rand -hex 32)
+export SEED_ADMIN_PASSWORD=$(openssl rand -base64 18)
 npm run migrate && npm start
 ```
 
-Switching executors requires only changing `EXECUTOR_KIND`; the factory probes
-availability and falls back (`ssh -> apptainer-cli -> mock`) so a misconfigured
-host never hard-fails.
+Executor selection is fail-closed: the factory probes the configured chain
+(`auto`: ssh → apptainer-cli) and **refuses to start** when nothing is usable —
+a misconfigured host must never degrade into an unisolated mock that still
+reports healthy. `EXECUTOR_KIND=mock` is rejected outright in production.
 
 ## Database backup & migration
 
