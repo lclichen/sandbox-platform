@@ -7,7 +7,7 @@
  * commands run locally via child_process.
  */
 import { spawn } from "node:child_process";
-import { mkdir, rm, cp, stat, readdir } from "node:fs/promises";
+import { mkdir, rm, cp, stat, readdir, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type {
@@ -25,6 +25,10 @@ import type {
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
 import { isValidEnvName } from "./shell-quote.ts";
+
+/** apptainer's phrasings when `instance stop` targets an unknown instance —
+ *  that is a successful stop for our purposes (idempotent end state). */
+const INSTANCE_NOT_FOUND_RE = /no instance|not found|does not exist|no such instance/i;
 
 /**
  * Host-isolation flags for `apptainer instance start`, mirroring the SSH
@@ -191,10 +195,16 @@ export class ApptainerCliExecutor implements SandboxExecutor {
   }
 
   async stop(handle: ContainerHandle): Promise<void> {
+    let r: { exitCode: number; stdout: string; stderr: string };
     try {
-      await this.runCli(["instance", "stop", handle.id]);
+      r = await this.runCli(["instance", "stop", handle.id]);
     } catch {
-      // instance may already be stopped
+      // spawn failure: treat as stopped — destroy() re-verifies via instance list.
+      handle.running = false;
+      return;
+    }
+    if (r.exitCode !== 0 && !INSTANCE_NOT_FOUND_RE.test(`${r.stderr}\n${r.stdout}`)) {
+      throw new Error(`apptainer instance stop 失败 (exit ${r.exitCode}): ${r.stderr.trim().slice(0, 300)}`);
     }
     handle.running = false;
   }
@@ -207,7 +217,15 @@ export class ApptainerCliExecutor implements SandboxExecutor {
     try {
       await this.runCli(["instance", "stop", handle.id]);
     } catch {
-      // ignore
+      // ignore; the liveness check below decides whether removal is safe
+    }
+    // Refuse to delete the overlay of an instance that is STILL RUNNING.
+    const listed = await this.runCli(["instance", "list", handle.id]);
+    const dataRows = listed.stdout.split("\n").slice(1).filter((l) => l.trim().length > 0);
+    if (listed.exitCode === 0 && dataRows.length > 0) {
+      throw new Error(
+        `instance ${handle.id} did not stop (still listed); refusing to delete its overlay — investigate on the host`,
+      );
     }
     await rm(handle.overlayPath, { recursive: true, force: true });
   }
@@ -245,8 +263,24 @@ export class ApptainerCliExecutor implements SandboxExecutor {
 
   async restore(snapshot: SnapshotHandle, req: CreateRequest): Promise<ContainerHandle> {
     const overlayPath = this.overlayPathFor(req.id);
-    await rm(overlayPath, { recursive: true, force: true });
-    await this.runHostUtil(["cp", "-a", "--sparse=always", snapshot.overlayPath, overlayPath]);
+    // Atomic swap: copy to a sibling temp, move the current overlay aside,
+    // rename the fresh one in. The old code rm -rf'd the live overlay before
+    // copying — a failed restore destroyed the container's data.
+    const tmp = `${overlayPath}.restore-tmp`;
+    const old = `${overlayPath}.restore-old`;
+    await rm(tmp, { recursive: true, force: true });
+    await rm(old, { recursive: true, force: true });
+    try {
+      await this.runHostUtil(["cp", "-a", "--sparse=always", snapshot.overlayPath, tmp]);
+      await rename(overlayPath, old).catch(() => undefined);
+      await rename(tmp, overlayPath);
+    } catch (err) {
+      throw new Error(
+        `snapshot copy failed: ${err instanceof Error ? err.message : String(err)} ` +
+          `(previous overlay may remain at ${old} for manual recovery)`,
+      );
+    }
+    await rm(old, { recursive: true, force: true });
     // env overrides must survive restore (LLM keys ride here). NOTE: no --pwd
     // here — this apptainer build rejects it on `instance start` (it is an
     // exec-level flag); every exec/PTY invocation sets cwd itself.

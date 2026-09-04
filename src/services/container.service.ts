@@ -14,6 +14,7 @@ import { handleFromRow, persistRunningState } from "../executors/types.ts";
 import { createQuotaService, type ResourceRequest } from "./quota.service.ts";
 import { createImageService, resolveImagePath } from "./image.service.ts";
 import { createWorkspaceService } from "./workspace.service.ts";
+import { withContainerLock } from "./container-lock.ts";
 import {
   NotFoundError,
   ForbiddenError,
@@ -256,6 +257,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
     },
 
     async start(id: number, userId: number, isAdmin = false): Promise<ContainerRow> {
+      return withContainerLock(id, async () => {
       const row = await this.requireOwned(id, userId, isAdmin);
       if (row.status === "running") return row;
       if (row.status === "destroyed") throw new InvalidStateError("Cannot start a destroyed container");
@@ -301,18 +303,22 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         id,
       );
       return (await this.requireById(id))!;
+      });
     },
 
     async stop(id: number, userId: number, isAdmin = false): Promise<ContainerRow> {
+      return withContainerLock(id, async () => {
       const row = await this.requireOwned(id, userId, isAdmin);
       if (row.status !== "running") throw new InvalidStateError(`Cannot stop a container in '${row.status}' state`);
       const handle = handleFromRow(row);
       await executor.stop(handle);
       await persistRunningState(db, id, false);
       return (await this.requireById(id))!;
+      });
     },
 
     async destroy(id: number, userId: number, isAdmin = false): Promise<void> {
+      return withContainerLock(id, async () => {
       const row = await this.requireOwned(id, userId, isAdmin);
       if (row.status === "destroyed") return;
       try {
@@ -334,9 +340,11 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         "UPDATE containers SET status = 'destroyed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         id,
       );
+      });
     },
 
     async snapshot(id: number, userId: number, name: string, description?: string, isAdmin = false, opts: { restartAfter?: boolean } = {}): Promise<{ id: number; name: string; sizeBytes: number }> {
+      return withContainerLock(id, async () => {
       const row = await this.requireOwned(id, userId, isAdmin);
       if (row.status === "destroyed") throw new InvalidStateError("Cannot snapshot a destroyed container");
       const quota = await quotas.forUser(userId);
@@ -408,19 +416,27 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       } finally {
         if (wasRunning && opts.restartAfter !== false) {
           try {
-            // Resume from the existing overlay via create (which carries the
-            // image path) — a bare executor.start() cannot rebuild the full
-            // instance-start command for SSH/CLI from a DB-derived handle.
-            const image = await images.requireById(row.image_id);
-            await executor.create({
-              id: row.instance_name!,
-              imagePath: resolveImagePath(image.sif_path),
-              cpu: row.cpu,
-              memoryMb: row.memory_mb,
-              diskGb: row.disk_gb,
-              overlayPath: handle.overlayPath,
-              env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
-            });
+            // Re-read the row INSIDE the lock: a concurrent destroy may have
+            // removed the container while the copy ran — restarting here would
+            // resurrect an instance the DB no longer tracks.
+            const current = await db.get<{ status: string }>("SELECT status FROM containers WHERE id = ?", id);
+            if (!current || current.status === "destroyed") {
+              logger.info({ id }, "snapshot: container destroyed during copy; skipping restart");
+            } else {
+              // Resume from the existing overlay via create (which carries the
+              // image path) — a bare executor.start() cannot rebuild the full
+              // instance-start command for SSH/CLI from a DB-derived handle.
+              const image = await images.requireById(row.image_id);
+              await executor.create({
+                id: row.instance_name!,
+                imagePath: resolveImagePath(image.sif_path),
+                cpu: row.cpu,
+                memoryMb: row.memory_mb,
+                diskGb: row.disk_gb,
+                overlayPath: handle.overlayPath,
+                env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
+              });
+            }
           } catch (err) {
             // The instance is stopped but the row says running — every later
             // tool call would fail with "instance not found". Mark stopped.
@@ -429,6 +445,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           }
         }
       }
+      });
     },
 
     async listSnapshots(id: number, userId: number, isAdmin = false) {
@@ -521,6 +538,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
     },
 
     async restoreSnapshot(id: number, snapshotId: number, userId: number, isAdmin = false): Promise<ContainerRow> {
+      return withContainerLock(id, async () => {
       const row = await this.requireOwned(id, userId, isAdmin);
       const snap = await db.get<{ id: number; name: string; overlay_path: string; size_bytes: number }>(
         "SELECT id, name, overlay_path, size_bytes FROM snapshots WHERE id = ? AND container_id = ?",
@@ -530,6 +548,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       if (!snap) throw new NotFoundError("Snapshot", snapshotId);
       await this._restoreFromSnapshot(row, snap);
       return (await this.requireById(id))!;
+      });
     },
 
     /** Shared restore path: quiesce the current instance, restore overlay, start.

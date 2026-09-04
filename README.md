@@ -155,7 +155,7 @@ long-lived API key (`sk_...`) via `X-API-Key` / `Authorization: Bearer`.
 | Admin LLM | `GET/POST/PATCH/DELETE /admin/llm/bindings`, `GET /admin/llm/bindings/:userId/usage`, `GET /admin/llm/keys\|models` | admin |
 | Ops | `GET /health`, `GET /ready`, `GET /metrics` (Prometheus) | any |
 
-LLM routes return `503 llm_not_enabled` when `LLM_ENABLED=false`.
+LLM routes return `501 LLM_NOT_ENABLED` when `LLM_ENABLED=false`.
 
 Request bodies are validated with zod; errors return
 `{ code, message, details? }` with appropriate HTTP status.

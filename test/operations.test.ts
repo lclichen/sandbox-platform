@@ -28,6 +28,9 @@ describe("readiness + metrics (P2-2)", () => {
 
   it("/metrics exposes prometheus text with platform gauges", async () => {
     ctx = await setupTestApp();
+    process.env.METRICS_PUBLIC = "on";
+    const { resetConfigForTesting } = await import("../src/config.ts");
+    resetConfigForTesting();
     const admin = await adminToken(ctx);
     const userToken = await createUserAndLogin(ctx, "metrics-user");
     await ctx
@@ -46,6 +49,27 @@ describe("readiness + metrics (P2-2)", () => {
     expect(res.text).toContain("sandbox_users_total");
     expect(res.text).toContain("sandbox_workspaces_total");
     expect(res.text).toContain("process_cpu_seconds_total");
+    delete process.env.METRICS_PUBLIC;
+    resetConfigForTesting();
+  });
+
+  it("/metrics is closed by default and opens with METRICS_TOKEN", async () => {
+    ctx = await setupTestApp();
+    // default (no token, no METRICS_PUBLIC): 503 with guidance
+    const closed = await ctx.request().get("/metrics");
+    expect(closed.status).toBe(503);
+    expect(closed.body?.code).toBe("METRICS_CLOSED");
+
+    // with a token: only the bearer gets in
+    process.env.METRICS_TOKEN = "metrics-secret-token";
+    const { resetConfigForTesting } = await import("../src/config.ts");
+    resetConfigForTesting();
+    const denied = await ctx.request().get("/metrics");
+    expect(denied.status).toBe(401);
+    const allowed = await ctx.request().get("/metrics").set("Authorization", "Bearer metrics-secret-token");
+    expect(allowed.status).toBe(200);
+    delete process.env.METRICS_TOKEN;
+    resetConfigForTesting();
   });
 });
 

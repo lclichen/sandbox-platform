@@ -17,6 +17,7 @@ import { setInterval as nodeSetInterval } from "node:timers";
 import type { Database, SqlValue } from "../db/driver.ts";
 import { handleFromRow, type SandboxExecutor, type ContainerRowForExecutor } from "../executors/types.ts";
 import { createContainerService } from "../services/container.service.ts";
+import { withContainerLock } from "../services/container-lock.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
 import { recordReaperReclaim } from "../middleware/metrics.ts";
@@ -97,8 +98,34 @@ export function createReaper(db: Database, executor: SandboxExecutor): Reaper {
       // Reclaim: quiesce → (optional) snapshot → mark auto_stopped.
       let snapshotId: number | null = null;
       try {
-        const handle = handleFromRow(row);
-        await executor.stop(handle);
+        // NOTE: containers.snapshot() takes the same per-container lock, so it
+        // must run OUTSIDE this critical section (the lock is not reentrant).
+        // Order: stop + mark stopped under the lock, then snapshot the quiesced
+        // overlay — the disk state is identical to stop→snapshot→mark.
+        let released = false;
+        await withContainerLock(row.id, async () => {
+          // Re-check under the lock: the user may have stopped+started the
+          // container between our SELECT and this moment — stopping the WRONG
+          // (freshly restarted) instance would silently roll their session
+          // back to the auto snapshot.
+          const fresh = await db.get<{ status: string; last_started_at: string | null }>(
+            "SELECT status, last_started_at FROM containers WHERE id = ?",
+            row.id,
+          );
+          if (!fresh || fresh.status !== "running") return;
+          if (parseDbUtc(fresh.last_started_at) !== parseDbUtc(row.last_started_at)) return; // restarted meanwhile
+          const handle = handleFromRow(row);
+          await executor.stop(handle);
+          const updated = await db.run(
+            "UPDATE containers SET status = 'stopped', auto_stopped = 1, auto_stopped_at = CURRENT_TIMESTAMP, last_stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running'",
+            row.id,
+          );
+          if (updated.changes > 0) {
+            released = true;
+            logger.info({ containerId: row.id, idleHours: config.reaper.idleAutoStopHours }, "reaper: container auto-stopped after idle threshold");
+          }
+        });
+        if (!released) continue;
         if (config.reaper.autoStopSnapshot) {
           const name = autoSnapshotName(config.reaper.snapshotTier);
           try {
@@ -116,14 +143,7 @@ export function createReaper(db: Database, executor: SandboxExecutor): Reaper {
             logger.warn({ containerId: row.id, err: (err as Error).message }, "reaper: auto snapshot failed; releasing anyway");
           }
         }
-        const updated = await db.run(
-          "UPDATE containers SET status = 'stopped', auto_stopped = 1, auto_stopped_at = CURRENT_TIMESTAMP, last_stopped_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running'",
-          row.id,
-        );
-        if (updated.changes > 0) {
-          summary.reclaimed.push({ containerId: row.id, snapshotId });
-          logger.info({ containerId: row.id, idleHours: config.reaper.idleAutoStopHours }, "reaper: container auto-stopped after idle threshold");
-        }
+        summary.reclaimed.push({ containerId: row.id, snapshotId });
       } catch (err) {
         logger.warn({ containerId: row.id, err: (err as Error).message }, "reaper: reclaim failed for container");
       }

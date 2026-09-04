@@ -36,6 +36,10 @@ import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
 import { isValidEnvName } from "./shell-quote.ts";
 
+/** apptainer's phrasings when `instance stop` targets an unknown instance —
+ *  that is a successful stop for our purposes (idempotent end state). */
+const INSTANCE_NOT_FOUND_RE = /no instance|not found|does not exist|no such instance/i;
+
 export class SshExecutor implements SandboxExecutor {
   readonly kind: ExecutorKind = "ssh";
   private readonly ssh: NodeSSH;
@@ -180,7 +184,13 @@ export class SshExecutor implements SandboxExecutor {
 
   async stop(handle: ContainerHandle): Promise<void> {
     await this.connect(handle.node);
-    await this.execRemote(`apptainer instance stop ${shellQuote(handle.id)}`);
+    const r = await this.execRemote(`apptainer instance stop ${shellQuote(handle.id)}`);
+    // "instance not found" IS the desired end state (already stopped); any
+    // other failure must surface — the service used to mark the row stopped
+    // regardless, desyncing DB state from a still-running instance.
+    if (r.code !== 0 && !INSTANCE_NOT_FOUND_RE.test(`${r.stderr}\n${r.stdout}`)) {
+      throw new Error(`apptainer instance stop 失败 (exit ${r.code}): ${r.stderr.trim().slice(0, 300)}`);
+    }
     handle.running = false;
   }
 
@@ -191,7 +201,18 @@ export class SshExecutor implements SandboxExecutor {
 
   async destroy(handle: ContainerHandle): Promise<void> {
     await this.connect(handle.node);
-    await this.execRemote(`apptainer instance stop ${shellQuote(handle.id)} 2>/dev/null || true`);
+    const stop = await this.execRemote(`apptainer instance stop ${shellQuote(handle.id)} 2>/dev/null || true`);
+    void stop;
+    // Refuse to rm -rf the overlay of an instance that is STILL RUNNING:
+    // a live ext3 overlay deleted underneath the kernel corrupts data.
+    const listed = await this.execRemote(
+      `apptainer instance list ${shellQuote(handle.id)} 2>/dev/null | tail -n +2 | grep -q . && echo ALIVE || echo GONE`,
+    );
+    if (listed.stdout.includes("ALIVE")) {
+      throw new Error(
+        `instance ${handle.id} did not stop (still listed); refusing to delete its overlay — investigate on the node`,
+      );
+    }
     await this.execRemote(`rm -rf ${shellQuote(handle.overlayPath)}`);
   }
 
@@ -212,10 +233,23 @@ export class SshExecutor implements SandboxExecutor {
     const host = req.node ?? this.defaultHost!;
     await this.connect(host);
     const overlayPath = req.overlayPath ?? `${this.overlayBaseDir}/${req.id}.ext3`;
+    // Atomic swap: copy to a sibling temp first, then rename the old overlay
+    // aside and move the fresh one in. A failed copy used to leave the
+    // container's live overlay DELETED (rm -rf then cp) — restore itself was
+    // the biggest data-loss path in the platform.
     const copy = await this.execRemote(
-      `rm -rf ${shellQuote(overlayPath)}; cp -a --sparse=always ${shellQuote(snapshot.overlayPath)} ${shellQuote(overlayPath)}`,
+      `tmp=${shellQuote(`${overlayPath}.restore-tmp`)}; old=${shellQuote(`${overlayPath}.restore-old`)}; ` +
+        `rm -rf "$tmp"; ` +
+        `cp -a --sparse=always ${shellQuote(snapshot.overlayPath)} "$tmp" && ` +
+        `{ rm -rf "$old"; mv ${shellQuote(overlayPath)} "$old" 2>/dev/null || true; } && ` +
+        `mv "$tmp" ${shellQuote(overlayPath)} && rm -rf "$old"`,
     );
-    if (copy.code !== 0) throw new Error(`snapshot copy failed (exit ${copy.code}): ${copy.stderr.trim().slice(0, 300)}`);
+    if (copy.code !== 0) {
+      throw new Error(
+        `snapshot copy failed (exit ${copy.code}): ${copy.stderr.trim().slice(0, 300)} ` +
+          `(previous overlay may remain at ${overlayPath}.restore-old for manual recovery)`,
+      );
+    }
     // env overrides must survive restore (LLM keys ride here)
     await this.startInstance(overlayPath, req.imagePath, req.id, req.cpu, req.memoryMb, "", req.env);
     return { id: req.id, node: host, overlayPath, running: true, imagePath: req.imagePath, env: req.env };

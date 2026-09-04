@@ -175,16 +175,23 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     }
   });
 
-  // Prometheus metrics (P2-2). Guarded by METRICS_TOKEN when set (bearer auth);
-  // left open in development otherwise. Promote closing this in production.
+  // Prometheus metrics (P2-2). Bearer-token guarded by default; explicit
+  // METRICS_PUBLIC=on opts out (trusted LAN only). Metrics leak user counts,
+  // container states and request paths — the default posture is closed.
   app.get("/metrics", async (req: Request, res: Response) => {
-    const token = loadConfig().metricsToken;
-    if (token) {
+    const cfg = loadConfig();
+    if (cfg.metricsToken) {
       const sent = req.headers.authorization ?? "";
-      if (!timingSafeEqualStr(sent, `Bearer ${token}`)) {
+      if (!timingSafeEqualStr(sent, `Bearer ${cfg.metricsToken}`)) {
         res.status(401).json({ code: "UNAUTHORIZED", message: "Metrics require a bearer token (METRICS_TOKEN)." });
         return;
       }
+    } else if (!cfg.metricsPublic) {
+      res.status(503).json({
+        code: "METRICS_CLOSED",
+        message: "Set METRICS_TOKEN to expose /metrics with auth, or METRICS_PUBLIC=on for a trusted LAN.",
+      });
+      return;
     }
     try {
       const body = await metricsHandler(db);

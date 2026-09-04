@@ -18,8 +18,9 @@
  *      WORKSPACE_BASE_DIR (as usual).
  */
 import { writeFileSync, mkdirSync } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createDatabase, closeDatabase, decodeJson } from "../src/db/driver.ts";
 import { loadConfig } from "../src/config.ts";
 import { logger } from "../src/utils/logger.ts";
@@ -106,6 +107,27 @@ export async function tarFileDirs(
   });
 }
 
+/**
+ * Retention: keep only the newest BACKUP_KEEP default-named archives in
+ * backups/ (custom --out paths are never pruned). The archives contain
+ * password hashes and refresh tokens — an unbounded, ever-growing plaintext
+ * pile in the project directory is a leak waiting to happen.
+ */
+export async function pruneBackups(keep: number): Promise<number> {
+  const dir = resolve("backups");
+  let names: string[];
+  try {
+    names = (await readdir(dir)).filter((n) => /^backup-.*\.json$/.test(n)).sort();
+  } catch {
+    return 0; // no backups dir yet
+  }
+  const doomed = names.slice(0, Math.max(0, names.length - keep));
+  for (const name of doomed) {
+    await rm(join(dir, name), { force: true });
+  }
+  return doomed.length;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const outIdx = args.indexOf("--out");
@@ -124,6 +146,12 @@ async function main() {
     writeFileSync(outPath, JSON.stringify(archive, null, 2));
     logger.info({ outPath, totalRows: Object.values(archive.tables).reduce((a, r) => a + r.length, 0) }, "backup written");
 
+    if (!outArg) {
+      const keep = Number.parseInt(process.env.BACKUP_KEEP ?? "20", 10);
+      const pruned = await pruneBackups(Number.isNaN(keep) || keep < 1 ? 20 : keep);
+      if (pruned > 0) logger.info({ pruned }, "backup retention: removed old archives");
+    }
+
     if (includeFiles) {
       const config = loadConfig();
       const fileDirs = [
@@ -140,14 +168,11 @@ async function main() {
 }
 
 // Only run the CLI when invoked directly, not when imported (e.g. by tests).
+// (A second unconditional main() call used to run a FULL backup on every
+// import — the reason backups/ had accumulated 128 plaintext archives.)
 if (process.argv[1]?.endsWith("backup.ts")) {
   main().catch((error) => {
     logger.error({ error: error instanceof Error ? error.message : String(error) }, "Backup failed.");
     process.exit(1);
   });
 }
-
-main().catch((error) => {
-  logger.error({ error: error instanceof Error ? error.message : String(error) }, "Backup failed.");
-  process.exit(1);
-});

@@ -43,7 +43,9 @@ function int(name: string, fallback: number): number {
 function bool(name: string, fallback: boolean): boolean {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
-  return raw === "true" || raw === "1";
+  // "on" is the repo's documented style (e.g. METRICS_PUBLIC=on,
+  // SEED_DEMO_IMAGES=on) — accept it alongside true/1.
+  return raw === "true" || raw === "1" || raw === "on";
 }
 
 export type DbDialect = "sqlite" | "postgresql";

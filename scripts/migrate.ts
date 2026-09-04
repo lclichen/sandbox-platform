@@ -33,6 +33,25 @@ async function main() {
 
   try {
     if (rollback) {
+      // Destructive confirmation: the chain is squashed, so rolling back the
+      // baseline literally DROPs every table (users, snapshots, audit logs).
+      // Require an explicit --force plus a data check; suggest a backup first.
+      const force = args.includes("--force");
+      const users = await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM users").catch(() => undefined);
+      const hasData = Number(users?.n ?? 0) > 0;
+      if (!force) {
+        logger.error(
+          "migrate:rollback is DESTRUCTIVE (the squashed chain rolls back by dropping ALL tables). " +
+            "Run `npm run backup` first, then re-run with --force to confirm.",
+        );
+        process.exit(1);
+      }
+      if (hasData) {
+        logger.warn(
+          { users: users?.n },
+          "Rolling back with live data — tables will be dropped. Hope you took that backup.",
+        );
+      }
       const rolled = await rollbackLast(db);
       if (rolled) logger.info({ migration: rolled }, "Rolled back migration.");
       else logger.info("No migrations to roll back.");
