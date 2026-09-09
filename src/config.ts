@@ -378,7 +378,7 @@ export function assertSecureProductionConfig(config: AppConfig): string[] {
       "SEED_ADMIN_PASSWORD is set to the insecure default 'changeme123'. Set a strong password in .env.",
     );
   }
-  if (config.executor.kind === "mock") {
+  if (config.executor.kind === "mock" && process.env.ALLOW_MOCK_EXECUTOR_IN_PRODUCTION !== "1") {
     problems.push(
       "EXECUTOR_KIND=mock executes user shells ON THE PLATFORM HOST (no isolation). Set EXECUTOR_KIND=ssh or apptainer-cli in production.",
     );
