@@ -1,0 +1,86 @@
+#!/usr/bin/env node
+/**
+ * pre-commit 密钥扫描 — 阻止凭据再次进入提交历史。
+ *
+ * 只检查本次暂存的新增行（git diff --cached），命中即拒绝提交。
+ * 两级规则：
+ *   1) 已知烧毁口令的字面匹配 —— 不受通用豁免影响（它们曾经泄露到公开
+ *      仓库，出现在新增行里几乎必然是事故；本文件规则行用
+ *      secret-scan:allow 标记自豁免）；
+ *   2) 通用密钥形态（sk- key、PEM 私钥、明文凭据赋值）—— 行内含
+ *      ${VAR} / $VAR / process.env / secret-scan:allow / 占位符时豁免。
+ *
+ * 确认误报时：git commit --no-verify（请先看清楚拦截的是什么）。
+ *
+ * 双模块兼容：仓库 package.json 声明 "type":"module" 时本文件按 ESM 解析
+ * （require 不存在），否则按 CJS —— child_process 经 require→动态 import
+ * 双路径加载，整个主体包在 async IIFE 里保证两种形态都可解析。
+ */
+(async () => {
+  const loadChildProcess = async () => {
+    try {
+      return require("node:child_process"); // CJS（pi-web / docs-wiki）
+    } catch {
+      return await import("node:child_process"); // ESM（"type":"module" 仓库）
+    }
+  };
+
+  let diff;
+  try {
+    const { execFileSync } = await loadChildProcess();
+    diff = execFileSync("git", ["diff", "--cached", "-U0", "--no-color"], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    // 拿不到 diff 时宁可放行（例如部分 rebase 场景），不阻塞正常工作流。
+    console.error("pre-commit: 无法读取暂存差异，跳过扫描（" + err.message + "）");
+    process.exit(0);
+  }
+
+  // 第一级：已知烧毁口令。（字面量即规则本身，行尾 allow 标记自豁免。）
+  const burnedRules = [
+    [/llmx112358/, "已烧毁的 VM SSH 密码"], // secret-scan:allow
+    [/LocalDev-9x/, "已烧毁的本地 dev 种子密码"], // secret-scan:allow
+    [/test1234/, "已烧毁的测试账号密码"], // secret-scan:allow
+    [/changeme123/, "平台默认口令（仍被真实部署使用）"], // secret-scan:allow
+  ];
+
+  // 第二级：通用形态。
+  const genericRules = [
+    [/sk-[A-Za-z0-9]{20,}/, "疑似 API Key（sk-…）"],
+    [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "PEM 私钥"],
+    [/(password|passwd|pwd|secret|token|apiKey|api_key)\s*[:=]\s*["'][^"'${][^"'${]{5,}["']/i, "明文凭据赋值（password/secret/token = '…'）"],
+  ];
+
+  const exempt = /\$\{|\$\w+|process\.env|<your-|your[-_]password|change[-_]?me|placeholder|\bexample\b/i;
+  // 烧毁口令规则只认 allow 标记自豁免（规则行本身含字面量），不受通用豁免影响。
+  const allowMarker = /secret-scan:allow/;
+
+  const hits = [];
+  for (const line of diff.split("\n")) {
+    if (!line.startsWith("+") || line.startsWith("+++")) continue;
+    const added = line.slice(1);
+    let hit = null;
+    if (!allowMarker.test(added)) {
+      for (const [pattern, why] of burnedRules) {
+        if (pattern.test(added)) { hit = why; break; }
+      }
+    }
+    if (!hit && !allowMarker.test(added) && !exempt.test(added)) {
+      for (const [pattern, why] of genericRules) {
+        if (pattern.test(added)) { hit = why; break; }
+      }
+    }
+    if (hit) hits.push("  [" + hit + "] " + added.trim().slice(0, 120));
+  }
+
+  if (hits.length > 0) {
+    console.error("✋ 暂存内容疑似包含凭据，提交被拒绝：");
+    for (const h of hits) console.error(h);
+    console.error("");
+    console.error("  真实凭据 → 环境变量，或 .gitignore 排除的本地文件（模板 scripts/vm-credentials.example.cjs）。");
+    console.error("  示例/黑名单等合法引用 → 行内加注释 secret-scan:allow，或确认后 git commit --no-verify。");
+    process.exit(1);
+  }
+})();

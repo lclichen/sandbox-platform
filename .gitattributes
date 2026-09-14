@@ -1,0 +1,2 @@
+# Hook scripts must stay LF-only: a CRLF checkout breaks the shebang on Windows
+.githooks/* text eol=lf
