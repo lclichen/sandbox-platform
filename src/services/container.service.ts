@@ -127,23 +127,25 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
     ): Promise<ContainerRow[]> {
       const limit = Math.min(opts.limit ?? 50, 200);
       const offset = opts.offset ?? 0;
+      // Fragments must alias `c.` — the users join makes bare `status`
+      // (users.status vs containers.status) ambiguous.
       const where: string[] = [];
       const params: SqlValue[] = [];
       if (userId !== undefined) {
-        where.push("user_id = ?");
+        where.push("c.user_id = ?");
         params.push(userId);
       }
       if (opts.status) {
-        where.push("status = ?");
+        where.push("c.status = ?");
         params.push(opts.status);
       }
       if (opts.image) {
-        where.push("image_id = ?");
+        where.push("c.image_id = ?");
         params.push(opts.image);
       }
       const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
       return db.all<ContainerRow>(
-        `SELECT c.*, u.username AS owner_username FROM containers c LEFT JOIN users u ON u.id = c.user_id ${clause ? clause.replace(/containers/g, "c") : ""} ORDER BY c.id DESC LIMIT ? OFFSET ?`,
+        `SELECT c.*, u.username AS owner_username FROM containers c LEFT JOIN users u ON u.id = c.user_id ${clause} ORDER BY c.id DESC LIMIT ? OFFSET ?`,
         ...params,
         limit,
         offset,

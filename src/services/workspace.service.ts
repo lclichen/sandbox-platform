@@ -32,6 +32,8 @@ export interface WorkspaceRow {
   is_template: boolean;
   created_at: string;
   updated_at: string;
+  /** Owner username (admin cross-user listing only; NULL otherwise). */
+  owner_username?: string | null;
 }
 
 export interface CreateWorkspaceInput {
@@ -102,25 +104,30 @@ export function createWorkspaceService(db: Database) {
       return ws;
     },
 
+    /** userId=undefined lists across users (admin panel) with owner_username. */
     async list(
-      userId: number,
+      userId: number | undefined,
       opts: { limit?: number; offset?: number; search?: string } = {},
     ): Promise<{ total: number; workspaces: WorkspaceRow[] }> {
       const limit = Math.min(opts.limit ?? 50, 200);
       const offset = opts.offset ?? 0;
-      const where: string[] = ["user_id = ?"];
-      const params: SqlValue[] = [userId];
+      const where: string[] = [];
+      const params: SqlValue[] = [];
+      if (userId !== undefined) {
+        where.push("w.user_id = ?");
+        params.push(userId);
+      }
       if (opts.search) {
-        where.push("name LIKE ?");
+        where.push("w.name LIKE ?");
         params.push(`%${opts.search}%`);
       }
-      const clause = where.join(" AND ");
+      const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
       const totalRow = await db.get<{ c: number }>(
-        `SELECT COUNT(*) AS c FROM workspaces WHERE ${clause}`,
+        `SELECT COUNT(*) AS c FROM workspaces w ${clause}`,
         ...params,
       );
       const rows = await db.all<Record<string, unknown>>(
-        `SELECT * FROM workspaces WHERE ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
+        `SELECT w.*, u.username AS owner_username FROM workspaces w LEFT JOIN users u ON u.id = w.user_id ${clause} ORDER BY w.id DESC LIMIT ? OFFSET ?`,
         ...params,
         limit,
         offset,

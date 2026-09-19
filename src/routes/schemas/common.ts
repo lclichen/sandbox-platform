@@ -193,7 +193,10 @@ export const updateWorkspaceSchema = z.object({
   isTemplate: z.boolean().optional(),
 });
 
-export const listWorkspacesSchema = paginationSchema;
+export const listWorkspacesSchema = paginationSchema.extend({
+  /** Admin only: cross-user listing for the pi-web admin panel. */
+  all: z.coerce.boolean().optional(),
+});
 
 // Workspace file path: a non-empty relative path with no shell/host metacharacters.
 export const workspacePathSchema = z.object({

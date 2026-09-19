@@ -133,9 +133,12 @@ export function workspacesRouter(): Router {
 
   router.get("/", (req, res, next) => {
     const query = validate(listWorkspacesSchema, req.query);
+    const a = actor(req);
     const svc = createWorkspaceService(getDb(req));
     svc
-      .list(currentUserId(req), query)
+      // Admin cross-user listing (pi-web admin panel); non-admins stay scoped
+      // regardless of the flag.
+      .list(a.isAdmin && query.all ? undefined : currentUserId(req), query)
       .then((result) => res.json(result))
       .catch(next);
   });
