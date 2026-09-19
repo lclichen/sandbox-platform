@@ -42,6 +42,8 @@ export interface ContainerRow {
   updated_at: string;
   last_started_at: string | null;
   last_stopped_at: string | null;
+  /** Owner username (admin cross-user listing only; NULL otherwise). */
+  owner_username?: string | null;
   /** Set by the reaper when it auto-released an idle container (snapshot + stop). */
   auto_stopped: boolean | number;
   auto_stopped_at: string | null;
@@ -141,7 +143,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       }
       const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
       return db.all<ContainerRow>(
-        `SELECT * FROM containers ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`,
+        `SELECT c.*, u.username AS owner_username FROM containers c LEFT JOIN users u ON u.id = c.user_id ${clause ? clause.replace(/containers/g, "c") : ""} ORDER BY c.id DESC LIMIT ? OFFSET ?`,
         ...params,
         limit,
         offset,

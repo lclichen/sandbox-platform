@@ -99,8 +99,13 @@ export function containersRouter(): Router {
     }
     const a = actor(req);
     const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
+    // Admin cross-user listing (the pi-web admin panel): ?all=1 lists every
+    // user's containers with owner_username; non-admins always stay scoped
+    // regardless of the flag.
+    const scope = a.isAdmin && query.all ? undefined : currentUserId(req);
+    delete query.all;
     svc
-      .list(currentUserId(req), query)
+      .list(scope, query)
       .then((rows) => res.json({ containers: rows.map((r) => svc._toPublic(r, a.isAdmin)) }))
       .catch(next);
   });

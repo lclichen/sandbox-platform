@@ -132,6 +132,8 @@ export const listContainersSchema = paginationSchema.extend({
   filter: z.enum(["running", "stopped", "all"]).optional(),
   /** R6: only containers created from this image id. */
   image: z.coerce.number().int().positive().optional(),
+  /** Admin only: cross-user listing for the pi-web admin panel. */
+  all: z.coerce.boolean().optional(),
 });
 
 export const createSnapshotSchema = z.object({
