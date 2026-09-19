@@ -8,15 +8,12 @@
   "engines": {
     "node": ">=20.11.0"
   },
-  "workspaces": [
-    "web"
-  ],
   "scripts": {
     "start": "node --experimental-transform-types --no-warnings=ExperimentalWarning src/index.ts",
     "dev": "node --watch --experimental-transform-types --no-warnings=ExperimentalWarning src/index.ts",
-    "build": "npm run build -w web",
-    "build:all": "npm run typecheck && npm run build -w web",
-    "setup": "npm install && npm run migrate && npm run build",
+    "build": "npm run typecheck",
+    "build:all": "npm run typecheck",
+    "setup": "npm install && npm run migrate",
     "migrate": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/migrate.ts",
     "migrate:rollback": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/migrate.ts rollback",
     "seed": "node --experimental-transform-types --no-warnings=ExperimentalWarning scripts/migrate.ts seed",

@@ -235,9 +235,10 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.use("/api/v1/llm", llmRouter());
   app.use("/api/v1/admin", adminRouter());
 
-  // Serve the admin SPA (web/dist) if it has been built. API routes above take
-  // precedence; anything else under a non-/api GET falls through to static
-  // files, with a catch-all to index.html for client-side routing.
+  // The admin SPA (formerly web/) has been retired: the pi-web platform admin
+  // panel is the sole management UI. This server is now API-only. If a legacy
+  // WEB_DIST_DIR build exists it is still served read-only for transition,
+  // but it is no longer built or shipped.
   const webDist = process.env.WEB_DIST_DIR
     ? resolve(process.env.WEB_DIST_DIR)
     : resolve(fileURLToPath(import.meta.url), "..", "..", "web", "dist");
@@ -245,25 +246,25 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     const indexHtml = resolve(webDist, "index.html");
     app.use(
       express.static(webDist, {
-        index: false, // handled by the catch-all below
+        index: false,
         setHeaders: (res, filePath) => {
-          // SPA assets are immutable-hashed; index.html must not be cached.
           if (filePath === indexHtml) {
             res.setHeader("Cache-Control", "no-cache");
           }
         },
       }),
     );
-    // SPA fallback: any non-API GET that did not match a static file -> index.html.
     app.get(/^\/(?!api\/|health).*/, (req: Request, res: Response, next: NextFunction) => {
       if (req.method !== "GET") return next();
-      // Avoid hijacking file extensions that simply don't exist (let them 404).
       if (extname(req.path).length > 0) return next();
       res.sendFile(indexHtml, (err) => {
         if (err) next(err);
       });
     });
-    logger.info({ webDist }, "Admin SPA static serving enabled.");
+    logger.warn(
+      { webDist },
+      "Serving a LEGACY admin SPA build. The web/ directory is retired; remove this build. Admin UI lives in pi-web.",
+    );
   }
 
   // 404 for unknown API routes.
@@ -272,7 +273,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     if (!req.path.startsWith("/api/")) {
       res.status(404).json({
         code: "NOT_FOUND",
-        message: "Admin UI not built. Run `npm run build` in the web/ directory.",
+        message: "This API server no longer hosts a UI. Manage the platform from the pi-web admin panel.",
       });
       return;
     }
