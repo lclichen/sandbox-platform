@@ -43,7 +43,7 @@ import { publicLogsRouter } from "./routes/logs.public.routes.ts";
 import { llmAdminRouter } from "./routes/llm.admin.routes.ts";
 import { llmRouter } from "./routes/llm.routes.ts";
 import { provisionRouter } from "./routes/provision.routes.ts";
-import { createLitellmClient, isLitellmConfigured, type LitellmClient } from "./services/litellm.client.ts";
+import { createLlmGatewayClient, isGatewayConfigured, type LlmGatewayClient } from "./services/agentgateway.client.ts";
 import { createLlmService } from "./services/llm.service.ts";
 import { type LlmEnvProvider } from "./services/container.service.ts";
 import { isValidKeyHex, type EncryptionKey } from "./utils/crypto.ts";
@@ -63,16 +63,16 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   // return 501 via the accessors below and no SANDBOX_LLM_* env is ever
   // injected into containers.
   const cfg = loadConfig();
-  let litellmClient: LitellmClient | undefined;
+  let llmGatewayClient: LlmGatewayClient | undefined;
   let llmEncryptionKey: EncryptionKey | undefined;
   const llmReady =
-    isLitellmConfigured({ enabled: cfg.llm.enabled, litellm: { masterKey: cfg.llm.litellm.masterKey } }) &&
+    isGatewayConfigured({ enabled: cfg.llm.enabled, adminUrl: cfg.llm.gateway.adminUrl }) &&
     isValidKeyHex(cfg.llm.encryptionKey);
   if (llmReady) {
-    litellmClient = createLitellmClient({
-      baseUrl: cfg.llm.litellm.baseUrl,
-      masterKey: cfg.llm.litellm.masterKey!,
-      timeoutMs: cfg.llm.litellm.timeoutMs,
+    llmGatewayClient = createLlmGatewayClient({
+      adminUrl: cfg.llm.gateway.adminUrl,
+      publicBaseUrl: cfg.llm.gateway.publicBaseUrl,
+      timeoutMs: cfg.llm.gateway.timeoutMs,
     });
     llmEncryptionKey = cfg.llm.encryptionKey;
   }
@@ -82,8 +82,8 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   // container env so in-container processes can drive LiteLLM directly.
   const llmEnvProvider: LlmEnvProvider | undefined = llmReady
     ? async (userId: number) => {
-        const svc = createLlmService(db, litellmClient!, llmEncryptionKey!, {
-          publicBaseUrl: cfg.llm.litellm.publicBaseUrl,
+        const svc = createLlmService(db, llmGatewayClient!, llmEncryptionKey!, {
+          publicBaseUrl: cfg.llm.gateway.publicBaseUrl,
         });
         const status = await svc.getMyStatus(userId);
         if (!status.binding || status.binding.revoked_at) return undefined;
@@ -91,7 +91,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
         const active = keys.find((k) => !k.revoked_at);
         if (!active) return undefined;
         const revealed = await svc.revealMyKey(active.id, userId);
-        const base = cfg.llm.litellm.publicBaseUrl.replace(/\/+$/, "");
+        const base = cfg.llm.gateway.publicBaseUrl.replace(/\/+$/, "");
         return {
           SANDBOX_LLM_BASE_URL: base.endsWith("/v1") ? base : `${base}/v1`,
           SANDBOX_LLM_API_KEY: revealed.plaintext,
@@ -140,10 +140,10 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.use((req: Request, _res: Response, next: NextFunction) => {
     req.app.locals.db = db;
     req.app.locals.executor = executor;
-    req.app.locals.litellmClient = litellmClient;
+    req.app.locals.litellmClient = llmGatewayClient;
     req.app.locals.llmReady = llmReady;
     req.app.locals.llmEncryptionKey = llmEncryptionKey;
-    req.app.locals.llmPublicBaseUrl = cfg.llm.litellm.publicBaseUrl;
+    req.app.locals.llmPublicBaseUrl = cfg.llm.gateway.publicBaseUrl;
     req.app.locals.llmEnvProvider = llmEnvProvider;
     next();
   });
@@ -162,10 +162,10 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
       await mkdir(overlayBase, { recursive: true });
       await access(overlayBase, fsConstants.W_OK);
       let litellm: "disabled" | "ok" | "down" = "disabled";
-      if (litellmClient) {
-        litellm = (await litellmClient.health()) ? "ok" : "down";
+      if (llmGatewayClient) {
+        litellm = (await llmGatewayClient.health()) ? "ok" : "down";
         recordLitellmHealth(litellm === "ok" ? "up" : "down");
-        if (litellm === "down") throw new Error("LiteLLM unreachable");
+        if (litellm === "down") throw new Error("agentgateway unreachable");
       } else {
         recordLitellmHealth("disabled");
       }
@@ -319,11 +319,10 @@ export function getExecutorFromReq(req: Request): SandboxExecutorRef {
  * each one re-checking config. 501 (not 503) signals "feature not deployed" —
  * clients skip it permanently instead of treating it as transient.
  */
-export function getLitellmClient(req: Request): LitellmClient {
-  const ready = req.app.locals.llmReady as boolean | undefined;
-  const client = req.app.locals.litellmClient as LitellmClient | undefined;
-  if (!ready || !client) {
-    throw new HttpError(501, "LLM_NOT_ENABLED", "LLM integration is not enabled. Set LLM_ENABLED=true and configure LITELLM_MASTER_KEY / LLM_ENCRYPTION_KEY.");
+export function getLitellmClient(req: Request): LlmGatewayClient {
+  const client = req.app.locals.litellmClient as LlmGatewayClient | undefined;
+  if (!client) {
+    throw new HttpError(501, "LLM_NOT_ENABLED", "LLM gateway integration is not enabled on this platform");
   }
   return client;
 }

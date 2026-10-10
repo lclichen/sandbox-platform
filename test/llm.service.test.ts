@@ -3,12 +3,12 @@
  *
  * Covers grantAccess (create + idempotent + re-grant after revoke),
  * updateBudget, revokeAccess, revealMyKey/revokeMyKey owner scoping, and the
- * LiteLLM failure path (grantAccess rolls back locally on createUser error).
+ * gateway failure path (grantAccess rolls back locally on createUser error).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { setupTestApp, teardownTestApp, createUserAndLogin, type TestContext } from "./helper.ts";
 import { createLlmService, type LlmService } from "../src/services/llm.service.ts";
-import type { LitellmClient, GeneratedKey } from "../src/services/litellm.client.ts";
+import type { LlmGatewayClient, GeneratedKey } from "../src/services/agentgateway.client.ts";
 import { HttpError, NotFoundError } from "../src/utils/errors.ts";
 import { encrypt } from "../src/utils/crypto.ts";
 
@@ -25,17 +25,10 @@ type MockMethods = Record<string, ReturnType<typeof vi.fn>>;
 function mockLitellmClient(overrides: Partial<MockMethods> = {}): MockMethods {
   const base: MockMethods = {
     health: vi.fn().mockResolvedValue(true),
-    createUser: vi.fn().mockResolvedValue({}),
-    updateUser: vi.fn().mockResolvedValue({}),
     getUserInfo: vi.fn().mockResolvedValue({ user_id: "x", spend: 0 }),
-    deleteUser: vi.fn().mockResolvedValue({}),
     generateKey: vi.fn().mockResolvedValue({ key: "sk-virt-default", key_name: "k-default" } satisfies GeneratedKey),
-    getKeyInfo: vi.fn().mockResolvedValue(null),
-    listKeys: vi.fn().mockResolvedValue([]),
-    updateKey: vi.fn().mockResolvedValue({}),
-    deleteKey: vi.fn().mockResolvedValue({ deleted_keys: [] }),
-    blockKey: vi.fn().mockResolvedValue({ blocked: true }),
-    unblockKey: vi.fn().mockResolvedValue({ blocked: false }),
+    deleteKey: vi.fn().mockResolvedValue(undefined),
+    putKeyResource: vi.fn().mockResolvedValue(undefined),
     listModels: vi.fn().mockResolvedValue([{ id: "gpt-4o" }, { id: "claude-sonnet" }]),
     getSpendLogs: vi.fn().mockResolvedValue([]),
     getSpendReport: vi.fn().mockResolvedValue([]),
@@ -60,7 +53,7 @@ describe("llm service", () => {
     adminId = adminRow!.id;
 
     client = mockLitellmClient();
-    svc = createLlmService(ctx.db, client as unknown as LitellmClient, ENC_KEY, {
+    svc = createLlmService(ctx.db, client as unknown as LlmGatewayClient, ENC_KEY, {
       publicBaseUrl: "http://litellm:4000",
     });
   });
@@ -70,9 +63,8 @@ describe("llm service", () => {
     vi.restoreAllMocks();
   });
 
-  it("grantAccess creates a LiteLLM user + key and stores an encrypted key", async () => {
-    client.createUser.mockResolvedValue({});
-    client.generateKey.mockResolvedValue({ key: "sk-virt-AAA", key_name: "k1" });
+  it("grantAccess records the binding and mints a gateway key (stored encrypted)", async () => {
+    client.generateKey.mockResolvedValue({ key: "sk-virt-AAA", key_name: "res-1" });
 
     const out = await svc.grantAccess({
       platformUserId: userId,
@@ -86,9 +78,8 @@ describe("llm service", () => {
     expect(out.binding.litellm_user_id).toBe(`litellm_user_${userId}`);
     expect(out.binding.username).toBe("llm-target");
     expect(out.key.plaintext).toBe("sk-virt-AAA");
-    // LiteLLM calls.
-    expect(client.createUser).toHaveBeenCalledWith(expect.objectContaining({ user_id: `litellm_user_${userId}`, max_budget: 10 }));
-    expect(client.generateKey).toHaveBeenCalledWith(expect.objectContaining({ user_id: `litellm_user_${userId}`, key_alias: "k1" }));
+    // Gateway calls: no user object exists — the key resource carries owner metadata.
+    expect(client.generateKey).toHaveBeenCalledWith(expect.objectContaining({ user_id: `litellm_user_${userId}`, key_alias: "k1", max_budget: 10 }));
 
     // The key is stored encrypted (not plaintext) in the DB.
     const row = await ctx.db.get<{ encrypted_key: string; key_prefix: string; name: string }>(
@@ -104,27 +95,29 @@ describe("llm service", () => {
   it("grantAccess is idempotent on an existing active binding (updates instead of recreating)", async () => {
     // First grant.
     await svc.grantAccess({ platformUserId: userId, maxBudget: 5, budgetDuration: "1d", grantedBy: adminId });
-    client.createUser.mockClear();
+    client.putKeyResource.mockClear();
 
     // Second grant with a different budget.
     const out = await svc.grantAccess({ platformUserId: userId, maxBudget: 50, budgetDuration: "7d", grantedBy: adminId });
 
-    // createUser NOT called again; updateUser was.
-    expect(client.createUser).not.toHaveBeenCalled();
-    expect(client.updateUser).toHaveBeenCalledWith(expect.objectContaining({ max_budget: 50, budget_duration: "7d" }));
+    // Budget change mirrors onto the user's active key resources.
+    expect(client.putKeyResource).toHaveBeenCalledWith(
+      "k-default",
+      expect.objectContaining({ owner: `litellm_user_${userId}`, maxBudget: 50, budgetDuration: "7d" }),
+    );
     expect(out.binding.max_budget).toBe(50);
   });
 
-  it("grantAccess on a revoked binding deletes the old LiteLLM user and re-creates", async () => {
+  it("grantAccess on a revoked binding deletes the stale key resource and re-issues", async () => {
     await svc.grantAccess({ platformUserId: userId, maxBudget: 5, grantedBy: adminId });
     await svc.revokeAccess(userId);
-    client.createUser.mockClear();
-    client.deleteUser.mockClear();
+    client.deleteKey.mockClear();
+    client.generateKey.mockClear();
 
     await svc.grantAccess({ platformUserId: userId, maxBudget: 20, grantedBy: adminId });
 
-    expect(client.deleteUser).toHaveBeenCalledWith([`litellm_user_${userId}`]);
-    expect(client.createUser).toHaveBeenCalledWith(expect.objectContaining({ user_id: `litellm_user_${userId}` }));
+    expect(client.deleteKey).toHaveBeenCalledWith(["k-default"]);
+    expect(client.generateKey).toHaveBeenCalledWith(expect.objectContaining({ user_id: `litellm_user_${userId}` }));
   });
 
   it("grantAccess on a non-existent platform user throws NotFound", async () => {
@@ -135,21 +128,24 @@ describe("llm service", () => {
 
   it("updateBudget syncs to LiteLLM and the local row", async () => {
     await svc.grantAccess({ platformUserId: userId, maxBudget: 5, budgetDuration: "1d", models: ["gpt-4o"], grantedBy: adminId });
-    client.updateUser.mockClear();
+    client.putKeyResource.mockClear();
 
     const binding = await svc.updateBudget(userId, { maxBudget: 99, models: ["gpt-4o", "claude-sonnet"] }, adminId);
 
-    expect(client.updateUser).toHaveBeenCalledWith(expect.objectContaining({ max_budget: 99 }));
+    expect(client.putKeyResource).toHaveBeenCalledWith(
+      "k-default",
+      expect.objectContaining({ owner: `litellm_user_${userId}`, maxBudget: 99, models: ["gpt-4o", "claude-sonnet"] }),
+    );
     expect(binding.max_budget).toBe(99);
   });
 
-  it("revokeAccess soft-revokes binding + keys and deletes the LiteLLM user", async () => {
+  it("revokeAccess soft-revokes binding + keys and deletes the key resources", async () => {
     await svc.grantAccess({ platformUserId: userId, maxBudget: 5, grantedBy: adminId });
-    client.deleteUser.mockClear();
+    client.deleteKey.mockClear();
 
     await svc.revokeAccess(userId);
 
-    expect(client.deleteUser).toHaveBeenCalledWith([`litellm_user_${userId}`]);
+    expect(client.deleteKey).toHaveBeenCalledWith(["k-default"]);
     const binding = await ctx.db.get<{ revoked_at: string | null }>(
       "SELECT revoked_at FROM llm_user_bindings WHERE platform_user_id = ?",
       userId,
@@ -162,15 +158,15 @@ describe("llm service", () => {
     expect(keys.every((k) => k.revoked_at !== null)).toBe(true);
   });
 
-  it("revokeAccess tolerates a 404 from LiteLLM (user already gone)", async () => {
+  it("revokeAccess tolerates a 404 from the gateway (resource already gone)", async () => {
     await svc.grantAccess({ platformUserId: userId, maxBudget: 5, grantedBy: adminId });
-    client.deleteUser.mockRejectedValue(new HttpError(404, "not_found", "gone"));
+    client.deleteKey.mockRejectedValue(new HttpError(404, "not_found", "gone"));
     await expect(svc.revokeAccess(userId)).resolves.toBeUndefined();
   });
 
-  it("revokeAccess re-throws non-404 LiteLLM errors", async () => {
+  it("revokeAccess re-throws non-404 gateway errors", async () => {
     await svc.grantAccess({ platformUserId: userId, maxBudget: 5, grantedBy: adminId });
-    client.deleteUser.mockRejectedValue(new HttpError(500, "llm_error", "boom"));
+    client.deleteKey.mockRejectedValue(new HttpError(500, "llm_error", "boom"));
     await expect(svc.revokeAccess(userId)).rejects.toMatchObject({ status: 500 });
   });
 
@@ -187,13 +183,13 @@ describe("llm service", () => {
     await expect(svc.revealMyKey(out.key.id, otherRow!.id)).rejects.toBeInstanceOf(NotFoundError);
   });
 
-  it("revokeMyKey soft-deletes locally and calls LiteLLM /key/delete with the plaintext", async () => {
+  it("revokeMyKey soft-deletes locally and deletes the gateway resource by id", async () => {
     const out = await svc.grantAccess({ platformUserId: userId, maxBudget: 5, grantedBy: adminId });
     client.deleteKey.mockClear();
 
     await svc.revokeMyKey(out.key.id, userId);
 
-    expect(client.deleteKey).toHaveBeenCalledWith([out.key.plaintext]);
+    expect(client.deleteKey).toHaveBeenCalledWith(["k-default"]);
     const row = await ctx.db.get<{ revoked_at: string | null }>(
       "SELECT revoked_at FROM llm_virtual_keys WHERE id = ?",
       out.key.id,
@@ -211,7 +207,7 @@ describe("llm service", () => {
     expect(svc.getEndpoint().baseUrl).toBe("http://litellm:4000");
   });
 
-  it("listModels proxies LiteLLM's model list", async () => {
+  it("listModels proxies the gateway's model list", async () => {
     const models = await svc.listModels();
     expect(models.map((m) => m.id)).toEqual(["gpt-4o", "claude-sonnet"]);
   });

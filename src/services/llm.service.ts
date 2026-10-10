@@ -1,25 +1,49 @@
 /**
- * LLM integration service: bridges platform users with LiteLLM proxy users,
- * virtual keys, budgets, and spend reporting.
+ * LLM integration service: bridges platform users with the agentgateway LLM
+ * gateway (2026-10 LiteLLM replacement, path b — the platform is the key
+ * authority; the gateway authenticates, enforces per-key budgets/model
+ * allowlists, and attributes requests per owner in its request logs).
  *
- * Responsibilities (management-proxy model — see plan):
- *   - Admin grants LLM access to a platform user → creates a LiteLLM user,
- *     issues an initial virtual key, stores the binding + encrypted key.
- *   - Admin updates budgets / revokes access → mirrored to LiteLLM.
- *   - Users self-serve: list/revoke/reveal their own keys, view usage, models,
- *     and the endpoint to drive LLM traffic directly.
+ * Responsibilities (management-proxy model — unchanged):
+ *   - Admin grants LLM access to a platform user → records the binding, mints
+ *     a gateway key resource, stores the binding + encrypted key.
+ *   - Admin updates budgets / revokes access → mirrored onto the user's key
+ *     resources via the admin API.
+ *   - Users self-serve: list/revoke/reveal their own keys, view usage (from
+ *     gateway request logs), models, and the endpoint to drive LLM traffic
+ *     directly.
  *
- * Budget enforcement lives in LiteLLM (max_budget + budget_duration); the
- * mirrored columns here are for display and re-issue only.
+ * Budget enforcement lives in the gateway (per-key USD budget + rolling
+ * window + Block); LiteLLM's user-level shared budget is approximated by
+ * applying the binding budget to each issued key, and "monthly" maps to a
+ * 30d rolling window. The mirrored columns here are for display and re-issue.
+ * DB column names keep their historical litellm_* spelling to avoid a
+ * migration; litellm_user_id holds the owner id, litellm_key_id the gateway
+ * resource id, litellm_key_hash the platform's sha256 of the plaintext.
  */
 import type { Database } from "../db/driver.ts";
 import type { DbDialect } from "../config.ts";
 import { encodeJson, decodeJson, type SqlValue } from "../db/driver.ts";
 import { createUserService } from "./user.service.ts";
-import type { LitellmClient, LiteLlmUserInfo, SpendLogEntry, SpendReportEntry } from "./litellm.client.ts";
+import type { LlmGatewayClient, LiteLlmUserInfo, SpendLogEntry, SpendReportEntry } from "./agentgateway.client.ts";
 import { encrypt, decrypt, type EncryptionKey } from "../utils/crypto.ts";
 import { NotFoundError, ConflictError, BadRequestError, HttpError } from "../utils/errors.ts";
 import { createHash } from "node:crypto";
+
+/** Active gateway key resources of a user: resource id + the platform's hash
+ *  of the plaintext (enough to rewrite the resource without a gateway GET). */
+async function activeKeyResources(
+  db: Database,
+  platformUserId: number,
+): Promise<Array<{ id: string; keyHash: string }>> {
+  const rows = await db.all<{ litellm_key_id: string | null; litellm_key_hash: string | null }>(
+    "SELECT litellm_key_id, litellm_key_hash FROM llm_virtual_keys WHERE user_id = ? AND revoked_at IS NULL AND litellm_key_id IS NOT NULL",
+    platformUserId,
+  );
+  return rows
+    .filter((r) => r.litellm_key_id && r.litellm_key_hash)
+    .map((r) => ({ id: r.litellm_key_id!, keyHash: r.litellm_key_hash! }));
+}
 
 // ----- row shapes -----
 
@@ -115,7 +139,7 @@ function hashForLookup(plaintext: string): string {
   return createHash("sha256").update(plaintext).digest("hex");
 }
 
-export function createLlmService(db: Database, litellm: LitellmClient, encryptionKey: EncryptionKey, opts: { publicBaseUrl: string }) {
+export function createLlmService(db: Database, gateway: LlmGatewayClient, encryptionKey: EncryptionKey, opts: { publicBaseUrl: string }) {
   const users = createUserService(db);
   const dialect: DbDialect = db.dialect;
   const publicBaseUrl = opts.publicBaseUrl;
@@ -176,13 +200,17 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
     const alias = user.username;
 
     if (existing && !existing.revoked_at) {
-      // Idempotent: just update budget/models on the existing LiteLLM user.
-      await litellm.updateUser({
-        user_id: litellmUserId,
-        user_alias: alias,
-        max_budget: input.maxBudget,
-        budget_duration: input.budgetDuration ?? undefined,
-        models: input.models ?? undefined,
+      // Idempotent: update budget/models locally and mirror onto the user's
+      // active gateway key resources.
+      const resources = await activeKeyResources(db, input.platformUserId);
+      await Promise.all(resources.map((r) => gateway.putKeyResource(r.id, {
+        keyHash: r.keyHash,
+        owner: litellmUserId,
+        models: input.models ?? null,
+        maxBudget: input.maxBudget,
+        budgetDuration: input.budgetDuration ?? null,
+      }))).catch(() => {
+        /* best-effort mirror; the local binding stays the source of truth */
       });
       await db.run(
         `UPDATE llm_user_bindings
@@ -206,24 +234,20 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
     }
 
     if (existing && existing.revoked_at) {
-      // Clean up the orphaned LiteLLM user before re-creating.
-      await litellm.deleteUser([litellmUserId]).catch(() => {
-        /* best-effort: it may already be gone */
+      // Clean up any key resources the old binding still holds before re-granting
+      // (rows are soft-revoked by revokeAccess, so scan regardless of state).
+      const stale = await db.all<{ litellm_key_id: string | null }>(
+        "SELECT litellm_key_id FROM llm_virtual_keys WHERE user_id = ? AND litellm_key_id IS NOT NULL",
+        input.platformUserId,
+      );
+      await gateway.deleteKey(stale.map((r) => r.litellm_key_id!).filter(Boolean)).catch(() => {
+        /* best-effort: they may already be gone */
       });
       await db.run("DELETE FROM llm_user_bindings WHERE platform_user_id = ?", input.platformUserId);
     }
 
-    // Create the LiteLLM user. Note: /user/new also returns a default key which
-    // we discard — we issue our own named key below for consistency.
-    await litellm.createUser({
-      user_id: litellmUserId,
-      user_alias: alias,
-      max_budget: input.maxBudget,
-      budget_duration: input.budgetDuration ?? undefined,
-      models: input.models ?? undefined,
-    });
-
-    // Record the binding locally.
+    // Record the binding locally (the gateway has no user object — the owner
+    // id rides each key resource's metadata and its per-request attribution).
     await db.run(
       `INSERT INTO llm_user_bindings
           (platform_user_id, litellm_user_id, litellm_alias, max_budget, budget_duration, models, granted_by)
@@ -259,11 +283,15 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
     const nextDuration = patch.budgetDuration !== undefined ? patch.budgetDuration : existing.budget_duration;
     const nextModels = patch.models !== undefined ? patch.models : existing.models;
 
-    await litellm.updateUser({
-      user_id: existing.litellm_user_id,
-      max_budget: nextBudget,
-      budget_duration: nextDuration ?? undefined,
-      models: nextModels ?? undefined,
+    const resources = await activeKeyResources(db, platformUserId);
+    await Promise.all(resources.map((r) => gateway.putKeyResource(r.id, {
+      keyHash: r.keyHash,
+      owner: existing.litellm_user_id,
+      models: nextModels,
+      maxBudget: nextBudget,
+      budgetDuration: nextDuration,
+    }))).catch(() => {
+      /* best-effort mirror; the local binding stays the source of truth */
     });
     await db.run(
       `UPDATE llm_user_bindings
@@ -287,10 +315,12 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
     const existing = await getBindingRow(platformUserId);
     if (!existing) throw new NotFoundError("LLM binding", platformUserId);
 
-    // Best-effort delete on the LiteLLM side; local state is the source of truth
-    // for whether access is "granted", so we revoke locally even if this fails.
-    await litellm.deleteUser([existing.litellm_user_id]).catch((err) => {
-      // Surface non-404 errors; a missing user is fine.
+    // Best-effort removal of the user's key resources on the gateway; local
+    // state is the source of truth for whether access is "granted", so we
+    // revoke locally even if this fails.
+    const resources = await activeKeyResources(db, platformUserId);
+    await gateway.deleteKey(resources.map((r) => r.id)).catch((err) => {
+      // Surface non-404 errors; a missing resource is fine.
       if (err instanceof HttpError && err.status !== 404) throw err;
     });
 
@@ -304,9 +334,9 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
     const existing = await getBindingRow(platformUserId);
     if (!existing || existing.revoked_at) throw new NotFoundError("LLM binding", platformUserId);
     const [user, report, logs] = await Promise.all([
-      litellm.getUserInfo(existing.litellm_user_id),
-      litellm.getSpendReport({ start_date: range.startDate, end_date: range.endDate, internal_user_id: existing.litellm_user_id }),
-      litellm.getSpendLogs({ start_date: range.startDate, end_date: range.endDate, user_id: existing.litellm_user_id }),
+      gateway.getUserInfo(existing.litellm_user_id),
+      gateway.getSpendReport({ start_date: range.startDate, end_date: range.endDate, user_id: existing.litellm_user_id }),
+      gateway.getSpendLogs({ start_date: range.startDate, end_date: range.endDate, user_id: existing.litellm_user_id }),
     ]);
     return { user, report, logs };
   }
@@ -322,7 +352,7 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
   }): Promise<{ plaintext: string; id: number }> {
     const binding = await getBindingRow(input.platformUserId);
     if (!binding || binding.revoked_at) throw new NotFoundError("LLM binding", input.platformUserId);
-    const generated = await litellm.generateKey({
+    const generated = await gateway.generateKey({
       user_id: binding.litellm_user_id,
       key_alias: input.name,
       models: input.models ?? undefined,
@@ -369,11 +399,14 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
     const row = await getKeyRow(id, userId);
     if (!row) throw new NotFoundError("LLM key", id);
     if (row.revoked_at) return; // idempotent
-    // Reconstruct plaintext to tell LiteLLM which key to delete.
-    const plaintext = decrypt(row.encrypted_key, encryptionKey);
-    await litellm.deleteKey([plaintext]).catch((err) => {
-      if (err instanceof HttpError && err.status !== 404) throw err;
-    });
+    // Delete by the stored gateway resource id (legacy rows without one are
+    // simply marked revoked locally — their gateway key, if any, is gone with
+    // the old deployment).
+    if (row.litellm_key_id) {
+      await gateway.deleteKey([row.litellm_key_id]).catch((err) => {
+        if (err instanceof HttpError && err.status !== 404) throw err;
+      });
+    }
     await db.run("UPDATE llm_virtual_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?", id);
   }
 
@@ -395,7 +428,7 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
   async function getMyStatus(userId: number): Promise<{ binding: LlmBindingPublic | null; litellm: LiteLlmUserInfo | null }> {
     const binding = await getBinding(userId);
     if (!binding || binding.revoked_at) return { binding: null, litellm: null };
-    const info = await litellm.getUserInfo(binding.litellm_user_id);
+    const info = await gateway.getUserInfo(binding.litellm_user_id);
     return { binding, litellm: info };
   }
 
@@ -413,7 +446,7 @@ export function createLlmService(db: Database, litellm: LitellmClient, encryptio
   }
 
   async function listModels() {
-    return litellm.listModels();
+    return gateway.listModels();
   }
 
   return {

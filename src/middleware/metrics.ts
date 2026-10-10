@@ -66,8 +66,8 @@ const reaperReclaimed = new Counter({
 });
 
 const litellmHealth = new Gauge({
-  name: "sandbox_litellm_health",
-  help: "LiteLLM proxy health: 1 up, 0 down, -1 disabled",
+  name: "sandbox_llm_gateway_health",
+  help: "agentgateway LLM gateway health: 1 up, 0 down, -1 disabled",
   registers: [registry],
 });
 

@@ -169,18 +169,16 @@ export interface AppConfig {
     defaultWorkspaceId: number;
   };
   llm: {
-    /** Master switch. When false, all /api/v1/*llm* routes return 503. */
+    /** Master switch. When false, all /api/v1/*llm* routes return 501. */
     enabled: boolean;
-    /** AES-256-GCM key (64 hex chars) for encrypting LiteLLM virtual-key plaintext. */
+    /** AES-256-GCM key (64 hex chars) for encrypting gateway-key plaintext. */
     encryptionKey: string | undefined;
-    litellm: {
-      /** Endpoint the platform uses to call LiteLLM management APIs. */
-      baseUrl: string;
-      /** Endpoint given to users/containers to drive LLM traffic directly. */
+    gateway: {
+      /** agentgateway admin API (config resources + request logs). */
+      adminUrl: string;
+      /** OpenAI-compatible data-plane endpoint handed to users/containers. */
       publicBaseUrl: string;
-      /** LiteLLM master key (sk-...), used to authenticate management calls. */
-      masterKey: string | undefined;
-      /** Per-request timeout for LiteLLM calls. */
+      /** Per-request timeout for admin-API calls. */
       timeoutMs: number;
     };
   };
@@ -295,11 +293,12 @@ export function loadConfig(): AppConfig {
     llm: {
       enabled: bool("LLM_ENABLED", false),
       encryptionKey: optional("LLM_ENCRYPTION_KEY"),
-      litellm: {
-        baseUrl: required("LITELLM_BASE_URL", "http://localhost:4000"),
-        publicBaseUrl: required("LITELLM_PUBLIC_BASE_URL", "http://localhost:4000"),
-        masterKey: optional("LITELLM_MASTER_KEY"),
-        timeoutMs: int("LITELLM_TIMEOUT_MS", 30000),
+      gateway: {
+        // agentgateway admin API (config/resources + logs), NOT the data plane.
+        adminUrl: required("AGENTGATEWAY_ADMIN_URL", "http://localhost:15000"),
+        // Data-plane OpenAI-compatible endpoint handed to clients/containers.
+        publicBaseUrl: required("AGENTGATEWAY_LLM_PUBLIC_URL", "http://localhost:4000"),
+        timeoutMs: int("AGENTGATEWAY_TIMEOUT_MS", 30000),
       },
     },
   };
@@ -318,7 +317,6 @@ const KNOWN_WEAK_JWT_SECRETS = new Set([
 ]);
 const INSECURE_DEFAULT_ADMIN_PASSWORD = "changeme123";
 /** LiteLLM master-key placeholders that must not survive into production. */
-const KNOWN_WEAK_LITELLM_KEYS = new Set(["sk-1234", "sk-123456"]);
 
 /**
  * Fail fast in production when secrets are left at their known-insecure
@@ -386,11 +384,9 @@ export function assertSecureProductionConfig(config: AppConfig): string[] {
   // LLM integration (optional). When enabled in production, both the LiteLLM
   // master key and the local encryption key must be real secrets.
   if (config.llm.enabled) {
-    const mk = config.llm.litellm.masterKey;
-    if (!mk || KNOWN_WEAK_LITELLM_KEYS.has(mk)) {
-      problems.push(
-        "LITELLM_MASTER_KEY is missing or a known placeholder. Generate one with: openssl rand -hex 24 (must start with 'sk-').",
-      );
+    const admin = config.llm.gateway.adminUrl;
+    if (!admin) {
+      problems.push("AGENTGATEWAY_ADMIN_URL is required when LLM_ENABLED=true.");
     }
     const ek = config.llm.encryptionKey;
     if (!ek || ek.length !== 64 || !/^[0-9a-fA-F]+$/.test(ek)) {
