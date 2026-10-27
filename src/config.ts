@@ -95,6 +95,25 @@ export interface AppConfig {
     adminPassword: string;
   };
   /** R1: self-registration switch + defaults. */
+  /** OIDC（标准 OpenID Connect）登录：授权码流 + PKCE，自动建户。
+   * 独立于 register.mode——IdP 已完成身份核验，不受本地自助注册开关约束；
+   * admin 本地账号不受影响，OIDC 用户恒为 user 角色。 */
+  oidc: {
+    enabled: boolean;
+    /** IdP issuer（发现文档取 <issuer>/.well-known/openid-configuration）。 */
+    issuerUrl: string;
+    clientId: string;
+    clientSecret: string;
+    /** 登录页按钮文案（如“统一身份登录”）。 */
+    label: string;
+    scopes: string;
+    /** 无发现文档的 IdP 可显式覆盖三个端点。 */
+    authorizationEndpoint: string | undefined;
+    tokenEndpoint: string | undefined;
+    jwksUri: string | undefined;
+    /** 允许回跳的 pi-web 地址前缀（OIDC_ALLOWED_REDIRECTS，逗号分隔）。 */
+    allowedRedirectPrefixes: string[];
+  };
   register: {
     mode: RegisterMode;
     /** resource_quotas.name assigned to self-registered accounts. */
@@ -224,6 +243,19 @@ export function loadConfig(): AppConfig {
     seed: {
       adminUsername: required("SEED_ADMIN_USERNAME", "admin"),
       adminPassword: required("SEED_ADMIN_PASSWORD", "changeme123"),
+    },
+    oidc: {
+      enabled: bool("OIDC_ENABLED", false),
+      issuerUrl: required("OIDC_ISSUER_URL", ""),
+      clientId: required("OIDC_CLIENT_ID", ""),
+      clientSecret: required("OIDC_CLIENT_SECRET", ""),
+      label: required("OIDC_LABEL", "OIDC"),
+      scopes: required("OIDC_SCOPES", "openid profile email"),
+      authorizationEndpoint: optional("OIDC_AUTHORIZATION_ENDPOINT"),
+      tokenEndpoint: optional("OIDC_TOKEN_ENDPOINT"),
+      jwksUri: optional("OIDC_JWKS_URI"),
+      allowedRedirectPrefixes: (required("OIDC_ALLOWED_REDIRECTS", ""))
+        .split(",").map((x) => x.trim()).filter(Boolean),
     },
     register: {
       mode: asRegisterMode(required("REGISTER_MODE", "off")),

@@ -102,6 +102,16 @@ export function createAuthService(db: Database) {
       return { ...pair, user };
     },
 
+    /** OIDC 登录：身份已由 IdP + id_token 验证完成，直接签发令牌对。 */
+    async loginDirect(user: UserRow, clientIp?: string): Promise<TokenPair & { user: UserRow }> {
+      if (user.status === "pending") throw new AccountPendingError();
+      if (user.status === "disabled") {
+        throw new HttpError(403, "ACCOUNT_DISABLED", "Account is disabled");
+      }
+      await users.touchLogin(user.id);
+      const pair = await issueTokenPair(user, clientIp);
+      return { ...pair, user };
+    },
     async refresh(refreshToken: string, clientIp?: string): Promise<TokenPair> {
       let claims: RefreshClaims;
       try {

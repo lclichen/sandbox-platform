@@ -28,6 +28,7 @@ export interface Migration {
 const migrationModules: Array<{ id: string; module: string }> = [
   { id: "0001_baseline", module: "./migrations/0001_baseline.ts" },
   { id: "0002_token_version", module: "./migrations/0002_token_version.ts" },
+  { id: "0003_oidc_identity", module: "./migrations/0003_oidc_identity.ts" },
 ];
 
 /** The former incremental chain — kept only to recognize already-migrated

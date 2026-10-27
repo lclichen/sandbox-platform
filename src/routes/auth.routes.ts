@@ -20,6 +20,12 @@ import { createApiKeyService } from "../services/apikey.service.ts";
 import { validatePasswordPolicy } from "../auth/password.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
 import { changePasswordLimiter } from "../middleware/rate-limit.ts";
+import { randomBytes } from "node:crypto";
+import {
+  oidcEnabled, discoverEndpoints, buildAuthorizeUrl, exchangeCodeForTokens,
+  verifyIdToken, createPkcePair, createNonce, encodeFlowState, decodeFlowState,
+} from "../auth/oidc.ts";
+import { upsertOidcUser, oidcPublicUser } from "../services/oidc.service.ts";
 import { BadRequestError } from "../utils/errors.ts";
 import { loginSchema, refreshSchema, registerSchema, changePasswordSchema, idParamSchema } from "./schemas/common.ts";
 import { validate } from "./validate.ts";
@@ -40,10 +46,130 @@ export function authRouter(): Router {
   // form only when the deployment actually allows self-registration.
   router.get("/config", (_req, res) => {
     const cfg = loadConfig();
-    res.json({ registerMode: cfg.register.mode });
+    res.json({ registerMode: cfg.register.mode, oidc: { enabled: oidcEnabled(), label: cfg.oidc.label } });
   });
 
-  // R1: self-registration. Behavior is driven by REGISTER_MODE:
+  // ------------------------------------------------------------------
+  // OIDC（标准 OpenID Connect）：授权码流 + PKCE。回跳 pi-web 时用 60 秒
+  // 一次性 handoff code 交接令牌（令牌不进 URL/日志），pi-web 服务端再经
+  // /oidc/exchange 换取。register.mode 不 gate：IdP 已核验身份。
+  // ------------------------------------------------------------------
+  const oidcFlowCookieName = "oidc_flow";
+  // 工程未引入 cookie-parser：这里只解析 oidc_flow 一个值，手写即可（零依赖）。
+  const readFlowCookie = (req: { headers: { cookie?: string } }): string | undefined =>
+    (req.headers.cookie ?? "").split("; ").find((part) => part.startsWith(oidcFlowCookieName + "="))?.slice(oidcFlowCookieName.length + 1);
+  const oidcHandoffs = new Map<string, { accessToken: string; refreshToken: string; user: ReturnType<typeof oidcPublicUser> }>();
+
+  router.get("/oidc/begin", (req, res, next) => {
+    if (!oidcEnabled()) {
+      res.status(404).json({ code: "NOT_FOUND", message: "OIDC is not enabled" });
+      return;
+    }
+    (async () => {
+      const cfg = loadConfig();
+      const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
+      if (!/^https?:\/\//.test(redirectUri)) {
+        res.status(400).json({ code: "BAD_REQUEST", message: "redirect_uri (http/https) is required" });
+        return;
+      }
+      // 回跳白名单：配置了前缀列表则强制匹配（防开放重定向）。
+      if (cfg.oidc.allowedRedirectPrefixes.length > 0
+        && !cfg.oidc.allowedRedirectPrefixes.some((prefix) => redirectUri.startsWith(prefix))) {
+        res.status(400).json({ code: "BAD_REQUEST", message: "redirect_uri is not allowed" });
+        return;
+      }
+      const endpoints = await discoverEndpoints();
+      const { verifier, challenge } = createPkcePair();
+      const nonce = createNonce();
+      const platformCallback = `${req.protocol}://${req.get("host")}/api/v1/auth/oidc/callback`;
+      const state = encodeFlowState({ verifier, nonce, redirectUri, exp: Date.now() + 10 * 60_000 });
+      const authorizeUrl = buildAuthorizeUrl(endpoints, {
+        clientId: cfg.oidc.clientId,
+        scopes: cfg.oidc.scopes,
+        redirectUri: platformCallback,
+        state,
+        nonce,
+        challenge,
+      });
+      res.cookie(oidcFlowCookieName, state, {
+        httpOnly: true,
+        sameSite: "lax",
+        maxAge: 10 * 60_000,
+        path: "/api/v1/auth/oidc",
+      });
+      res.redirect(authorizeUrl);
+    })().catch(next);
+  });
+
+  router.get("/oidc/callback", (req, res, next) => {
+    if (!oidcEnabled()) {
+      res.status(404).json({ code: "NOT_FOUND", message: "OIDC is not enabled" });
+      return;
+    }
+    const fail = (message: string) => res.redirect(`/api/v1/auth/oidc/callback-error?message=${encodeURIComponent(message)}`);
+    (async () => {
+      const cfg = loadConfig();
+      if (typeof req.query.error === "string") {
+        fail(String(req.query.error_description ?? req.query.error));
+        return;
+      }
+      const code = typeof req.query.code === "string" ? req.query.code : "";
+      const stateCookie = readFlowCookie(req);
+      const flow = decodeFlowState(typeof req.query.state === "string" ? req.query.state : undefined);
+      if (!code || !flow || flow.verifier !== decodeFlowState(stateCookie)?.verifier) {
+        fail("授权状态校验失败（state 不符或已过期），请重新发起登录");
+        return;
+      }
+      res.clearCookie(oidcFlowCookieName, { path: "/api/v1/auth/oidc" });
+      const endpoints = await discoverEndpoints();
+      const platformCallback = `${req.protocol}://${req.get("host")}/api/v1/auth/oidc/callback`;
+      const { idToken } = await exchangeCodeForTokens(endpoints, {
+        clientId: cfg.oidc.clientId,
+        clientSecret: cfg.oidc.clientSecret,
+        redirectUri: platformCallback,
+        code,
+        verifier: flow.verifier,
+      });
+      const claims = await verifyIdToken(idToken, flow.nonce);
+      const db = getDb(req);
+      const user = await upsertOidcUser(db, claims);
+      const auth = createAuthService(db);
+      const pair = await auth.loginDirect(user, req.ip);
+      const handoff = randomBytes(24).toString("base64url");
+      oidcHandoffs.set(handoff, {
+        accessToken: pair.accessToken,
+        refreshToken: pair.refreshToken,
+        user: oidcPublicUser(user),
+      });
+      setTimeout(() => oidcHandoffs.delete(handoff), 60_000).unref?.();
+      const back = new URL(flow.redirectUri);
+      back.searchParams.set("code", handoff);
+      res.redirect(back.toString());
+    })().catch((err) => fail(err instanceof Error ? err.message : String(err)));
+  });
+
+  // 一次性 handoff code → 平台令牌对（pi-web 服务端调用）。
+  router.post("/oidc/exchange", (req, res) => {
+    const body = req.body as { code?: unknown };
+    const handoff = typeof body.code === "string" ? oidcHandoffs.get(body.code) : undefined;
+    if (typeof body.code === "string") oidcHandoffs.delete(body.code);
+    if (!handoff) {
+      res.status(401).json({ code: "UNAUTHORIZED", message: "handoff code 无效或已过期" });
+      return;
+    }
+    res.json({
+      accessToken: handoff.accessToken,
+      refreshToken: handoff.refreshToken,
+      user: handoff.user,
+    });
+  });
+
+  // 无人值守的失败展示（浏览器 302 落点；pi-web 场景几乎不会到达）。
+  router.get("/oidc/callback-error", (_req, res) => {
+    res.status(401).json({ code: "OIDC_LOGIN_FAILED", message: "OIDC 登录失败" });
+  });
+
+    // R1: self-registration. Behavior is driven by REGISTER_MODE:
   //   off      -> 404 (identical to an unknown route; the endpoint "does not exist")
   //   open     -> account created active with the default quota
   //   approval -> account created pending; an admin approves via /admin/users
