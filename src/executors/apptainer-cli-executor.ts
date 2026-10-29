@@ -146,6 +146,11 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       ...(this.resourceLimits && req.cpu ? ["--cpus", String(req.cpu)] : []),
       ...(this.resourceLimits && req.memoryMb ? ["--memory", `${req.memoryMb}M`] : []),
       ...envArgs(req.env),
+      // Input staging (read-only) + output reclaim (live RW workspace dir);
+      // see docs/沙盒输入输出挂载设计.md. Re-applied on every restart by the
+      // container service re-calling create() with mountDirs.
+      ...(req.mountDirs ? ["--bind", `${req.mountDirs.inputDir}:/input:ro`] : []),
+      ...(req.mountDirs?.outputDir ? ["--bind", `${req.mountDirs.outputDir}:/output`] : []),
       "--overlay", overlayPath,
       req.imagePath,
       req.id,

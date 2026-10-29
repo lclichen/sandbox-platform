@@ -14,6 +14,19 @@ import { handleFromRow, persistRunningState } from "../executors/types.ts";
 import { createQuotaService, type ResourceRequest } from "./quota.service.ts";
 import { createImageService, resolveImagePath } from "./image.service.ts";
 import { createWorkspaceService } from "./workspace.service.ts";
+import {
+  MOUNT_LIMITS,
+  assertDirHasNoSymlinks,
+  duBytes,
+  ensureInputDir,
+  ensureOutputDir,
+  inputDir,
+  materializeInput,
+  outputRelDir,
+  removeInputDir,
+  removeStagingEntry,
+  resolveInputSource,
+} from "./container-mounts.ts";
 import { withContainerLock } from "./container-lock.ts";
 import {
   NotFoundError,
@@ -88,6 +101,23 @@ export interface CreateContainerInput {
   diskGb?: number;
   env?: Record<string, string>;
   workspaceId?: number;
+  /** Input/output mounts (docs/沙盒输入输出挂载设计.md). */
+  mounts?: {
+    /** Workspace files/subtrees materialized into the ro /input staging dir. */
+    inputs?: Array<{ workspaceId: number; path: string }>;
+    /** Live RW bind of <workspace>/outputs/<container-name>/ at /output. */
+    output?: { workspaceId: number };
+  };
+}
+
+export interface ContainerMountRow {
+  id: number;
+  container_id: number;
+  kind: "input" | "output";
+  workspace_id: number;
+  rel_path: string;
+  name: string;
+  created_at: string;
 }
 
 /**
@@ -197,6 +227,21 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         input.env || llmEnv ? { ...(input.env ?? {}), ...(llmEnv ?? {}) } : undefined;
 
       const instanceName = `sb-${nanoid(12)}`;
+
+      // Resolve an optional workspace to seed /workspace from. Ownership is
+      // enforced via requireOwned (404 for non-owners). The host path is passed
+      // to the executor which decides how to apply it (cp or bind-mount).
+      let seedFromPath: string | undefined;
+      if (input.workspaceId !== undefined) {
+        const ws = await workspaces.requireOwned(input.workspaceId, userId);
+        seedFromPath = workspaces.hostDir(ws);
+      }
+
+      // Input/output mounts: resolve BEFORE the row insert so a bad selection
+      // (missing item / symlink / over-cap / foreign workspace) fails without
+      // leaking a 'creating' row that still counts against the user's quota.
+      const mountSetup = await this._prepareMounts(userId, instanceName, input.name, input.mounts);
+
       const result = await db.run(
         `INSERT INTO containers
           (user_id, image_id, name, instance_name, status, cpu, memory_mb, disk_gb, env)
@@ -212,15 +257,6 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       );
       const containerId = Number(result.lastInsertRowid);
 
-      // Resolve an optional workspace to seed /workspace from. Ownership is
-      // enforced via requireOwned (404 for non-owners). The host path is passed
-      // to the executor which decides how to apply it (cp or bind-mount).
-      let seedFromPath: string | undefined;
-      if (input.workspaceId !== undefined) {
-        const ws = await workspaces.requireOwned(input.workspaceId, userId);
-        seedFromPath = workspaces.hostDir(ws);
-      }
-
       try {
         const handle = await executor.create({
           id: instanceName,
@@ -230,6 +266,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           diskGb: request.disk_gb,
           env: mergedEnv,
           seedFromPath,
+          ...(mountSetup ? { mountDirs: mountSetup.mountDirs } : {}),
           // Admin opt-in per image: 'dir' provisions a thin directory overlay
           // instead of a pre-sized ext3 image (see images.overlay_kind).
           ...(image.overlay_kind === "dir" ? { overlayKind: "dir" as const } : {}),
@@ -247,6 +284,17 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
           containerId,
           handle.overlayPath,
         );
+        // Persist the mount rows (replayed on every restart).
+        for (const m of mountSetup?.rows ?? []) {
+          await db.run(
+            "INSERT INTO container_mounts (container_id, kind, workspace_id, rel_path, name) VALUES (?, ?, ?, ?, ?)",
+            containerId,
+            m.kind,
+            m.workspaceId,
+            m.relPath,
+            m.name,
+          );
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await db.run(
@@ -292,6 +340,10 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         // No snapshot to resume from — fall through to a plain overlay start.
       }
       const image = await images.requireById(row.image_id);
+      // Mount replay: containers with persisted mounts re-derive their bind
+      // dirs on EVERY start (this also fixes the pre-existing gap where the
+      // seed bind silently vanished after stop/start).
+      const replayMounts = await this._replayMounts(row);
       const handle = await executor.create({
         id: row.instance_name!,
         imagePath: resolveImagePath(image.sif_path),
@@ -299,6 +351,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         memoryMb: row.memory_mb,
         diskGb: row.disk_gb,
         env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
+        ...(replayMounts ? { mountDirs: replayMounts } : {}),
       });
       await db.run(
         "UPDATE containers SET status = 'running', overlay_path = ?, node = ?, last_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, error_message = NULL WHERE id = ?",
@@ -335,6 +388,14 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       } catch (err) {
         // Even if destroy fails on the runtime side, mark destroyed in DB.
         logger.warn({ err, containerId: id }, "executor destroy error (container still marked destroyed)");
+      }
+      // Input staging is container-scoped (the workspace SOURCES and the
+      // reclaimed outputs both live in the user's workspace) — clean it up.
+      // Best-effort: a stuck file must not block destruction.
+      if (row.instance_name) {
+        await removeInputDir(row.instance_name).catch((err) => {
+          logger.warn({ containerId: id, err: (err as Error).message }, "destroy: input staging cleanup failed (best-effort)");
+        });
       }
       // Snapshots OUTLIVE the container (migration 0005: user-owned save
       // points — the recycle-then-restore workflow). Do NOT touch them here;
@@ -580,6 +641,7 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
             memoryMb: row.memory_mb,
             diskGb: row.disk_gb,
             env: decodeJson<Record<string, string>>(row.env ?? null, db.dialect as never) ?? undefined,
+            ...(await this._replayMounts(row)),
           },
         );
         await db.run(
@@ -640,6 +702,136 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         throw new NotFoundError("Container", id);
       }
       return row;
+    },
+
+    // ---- input/output mounts (docs/沙盒输入输出挂载设计.md) ----
+
+    /** Resolve create-time mounts into executor bind dirs + persistable rows.
+     *  Runs BEFORE the container row exists, so validation failures leave no
+     *  side effects beyond the (empty) staging dir. */
+    async _prepareMounts(
+      userId: number,
+      instanceName: string,
+      containerName: string,
+      mounts: CreateContainerInput["mounts"],
+    ): Promise<{ mountDirs: { inputDir: string; outputDir?: string }; rows: Array<{ kind: "input" | "output"; workspaceId: number; relPath: string; name: string }> } | undefined> {
+      if (!mounts || (!mounts.inputs?.length && !mounts.output)) return undefined;
+      const inputs = mounts.inputs ?? [];
+      if (inputs.length > MOUNT_LIMITS.maxInputs) {
+        throw new BadRequestError(`输入挂载项过多（>${MOUNT_LIMITS.maxInputs}）`);
+      }
+
+      const stagingDir = await ensureInputDir(instanceName);
+      const rows: Array<{ kind: "input" | "output"; workspaceId: number; relPath: string; name: string }> = [];
+      let totalBytes = 0;
+      for (const item of inputs) {
+        const ws = await workspaces.requireOwned(item.workspaceId, userId);
+        const src = await resolveInputSource(ws.user_id, ws.id, item.path);
+        totalBytes += src.sizeBytes;
+        if (totalBytes > MOUNT_LIMITS.maxInputBytes) {
+          throw new BadRequestError(`输入挂载总量超过 1GB 上限`);
+        }
+        const name = await materializeInput(src.hostPath, stagingDir, src.name);
+        rows.push({ kind: "input", workspaceId: ws.id, relPath: item.path.replace(/^\/+/, ""), name });
+      }
+
+      let outputDir: string | undefined;
+      if (mounts.output) {
+        const ws = await workspaces.requireOwned(mounts.output.workspaceId, userId);
+        outputDir = await ensureOutputDir(ws.user_id, ws.id, containerName);
+        rows.push({ kind: "output", workspaceId: ws.id, relPath: outputRelDir(containerName), name: "output" });
+      }
+
+      // Inputs-only containers bind just /input; the RW /output bind only
+      // exists when an output workspace was chosen.
+      return { mountDirs: { inputDir: stagingDir, ...(outputDir ? { outputDir } : {}) }, rows };
+    },
+
+    /** Re-derive the bind dirs for a container that has persisted mounts.
+     *  Called on EVERY start/restore so binds survive restarts. Returns
+     *  undefined when the container has no mounts. */
+    async _replayMounts(row: ContainerRow): Promise<{ inputDir: string; outputDir?: string } | undefined> {
+      const rows = await db.all<{ kind: string; workspace_id: number; rel_path: string }>(
+        "SELECT kind, workspace_id, rel_path FROM container_mounts WHERE container_id = ?",
+        row.id,
+      );
+      if (rows.length === 0) return undefined;
+      const inputDir = await ensureInputDir(row.instance_name!);
+      const output = rows.find((r) => r.kind === "output");
+      if (!output) return { inputDir };
+      // Ownership may have changed hands only via admin flows; the row's
+      // owner is the authority for the workspace path.
+      const ws = await workspaces.requireOwned(output.workspace_id, row.user_id, true);
+      const outputDir = await ensureOutputDir(ws.user_id, ws.id, row.name);
+      // Security gate: the RW bind lets the container plant symlinks in the
+      // workspace; refuse to restart into a poisoned output dir.
+      await assertDirHasNoSymlinks(outputDir);
+      return { inputDir, outputDir };
+    },
+
+    /** List a container's mounts (inputs + the output binding, if any). */
+    async getMounts(containerId: number): Promise<ContainerMountRow[]> {
+      return db.all<ContainerMountRow>(
+        "SELECT id, container_id, kind, workspace_id, rel_path, name, created_at FROM container_mounts WHERE container_id = ? ORDER BY id",
+        containerId,
+      );
+    },
+
+    /** Add ONE input mount at runtime — materialize into the staging dir; the
+     *  ro /input bind makes it visible in the container instantly (no restart).
+     *  Allowed in any non-destroyed state. */
+    async addInput(
+      containerId: number,
+      userId: number,
+      item: { workspaceId: number; path: string },
+      isAdmin = false,
+    ): Promise<ContainerMountRow> {
+      const row = await this.requireOwned(containerId, userId, isAdmin);
+      if (row.status === "destroyed") throw new InvalidStateError("Cannot mount inputs on a destroyed container");
+      if (!row.instance_name) throw new InvalidStateError("Container has no instance name");
+
+      const existing = await this.getMounts(containerId);
+      const inputRows = existing.filter((m) => m.kind === "input");
+      if (inputRows.length >= MOUNT_LIMITS.maxInputs) {
+        throw new BadRequestError(`输入挂载项过多（>${MOUNT_LIMITS.maxInputs}）：请先移除部分挂载`);
+      }
+
+      const ws = await workspaces.requireOwned(item.workspaceId, userId, isAdmin);
+      const src = await resolveInputSource(ws.user_id, ws.id, item.path);
+      const stagingDir = await ensureInputDir(row.instance_name);
+      const usedBytes = await duBytes(stagingDir);
+      if (usedBytes + src.sizeBytes > MOUNT_LIMITS.maxInputBytes) {
+        throw new BadRequestError(`输入挂载总量将超过 1GB 上限`);
+      }
+      const name = await materializeInput(src.hostPath, stagingDir, src.name);
+      const result = await db.run(
+        "INSERT INTO container_mounts (container_id, kind, workspace_id, rel_path, name) VALUES (?, 'input', ?, ?, ?)",
+        containerId,
+        ws.id,
+        item.path.replace(/^\/+/, ""),
+        name,
+      );
+      const mounted = await db.get<ContainerMountRow>(
+        "SELECT id, container_id, kind, workspace_id, rel_path, name, created_at FROM container_mounts WHERE id = ?",
+        Number(result.lastInsertRowid),
+      );
+      return mounted!;
+    },
+
+    /** Remove one input mount: delete the staging entry + the row. The item
+     *  disappears from /input immediately (bind is live). */
+    async removeInput(containerId: number, userId: number, mountId: number, isAdmin = false): Promise<void> {
+      const row = await this.requireOwned(containerId, userId, isAdmin);
+      const m = await db.get<ContainerMountRow>(
+        "SELECT id, container_id, kind, workspace_id, rel_path, name, created_at FROM container_mounts WHERE id = ? AND container_id = ?",
+        mountId,
+        containerId,
+      );
+      if (!m || m.kind !== "input") throw new NotFoundError("Input mount", mountId);
+      if (row.instance_name) {
+        await removeStagingEntry(inputDir(row.instance_name), m.name);
+      }
+      await db.run("DELETE FROM container_mounts WHERE id = ?", mountId);
     },
 
     /** Open a relay connection session record (used by tools/routes). */

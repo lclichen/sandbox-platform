@@ -99,13 +99,42 @@ function dirname(p: string): string {
   return pathDirname(p);
 }
 
+/**
+ * Realpath containment (symlink-escape guard). resolveInWorkspace blocks
+ * lexical `..` traversal but a SYMLINK inside the workspace — e.g. one planted
+ * by a container through its RW /output bind — resolves to an arbitrary host
+ * path and would be served/deleted/overwritten by the workspace API. Every
+ * mutating or content-reading operation therefore verifies the REAL path of
+ * the final target (and of each parent being written through) stays inside
+ * the workspace's real root. Missing targets pass through so the operation
+ * itself raises the proper 404.
+ */
+async function assertRealWithin(root: string, candidate: string): Promise<void> {
+  const realRoot = await realpathNative(root).catch(() => root);
+  const real = await realpathNative(candidate).catch(() => null);
+  if (real === null) return; // absent — the op will 404 on its own
+  const prefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+  if (real !== realRoot && !real.startsWith(prefix)) {
+    throw new BadRequestError("路径解析到工作区之外（符号链接被拒绝）");
+  }
+}
+
+const realpathNative = (p: string) => import("node:fs/promises").then((m) => m.realpath(p));
+
+/** Resolve + realpath-verify a workspace path (containment on both layers). */
+async function secureResolve(userId: number, wsId: number, rel: string): Promise<string> {
+  const abs = resolveInWorkspace(userId, wsId, rel);
+  await assertRealWithin(workspaceDir(userId, wsId), abs);
+  return abs;
+}
+
 /** List the contents of a directory (one level) inside the workspace. */
 export async function listFiles(
   userId: number,
   wsId: number,
   rel: string,
 ): Promise<WorkspaceFileEntry[]> {
-  const dir = resolveInWorkspace(userId, wsId, rel);
+  const dir = await secureResolve(userId, wsId, rel);
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -149,14 +178,14 @@ export async function writeFile(
   rel: string,
   content: Buffer,
 ): Promise<void> {
-  const abs = resolveInWorkspace(userId, wsId, rel);
+  const abs = await secureResolve(userId, wsId, rel);
   await mkdir(pathDirname(abs), { recursive: true });
   await fsWriteFile(abs, content);
 }
 
 /** Read a file inside the workspace as a Buffer. */
 export async function readFile(userId: number, wsId: number, rel: string): Promise<Buffer> {
-  const abs = resolveInWorkspace(userId, wsId, rel);
+  const abs = await secureResolve(userId, wsId, rel);
   try {
     return await fsReadFile(abs);
   } catch (err) {
@@ -169,7 +198,7 @@ export async function readFile(userId: number, wsId: number, rel: string): Promi
 
 /** Delete a file or directory (recursive) inside the workspace. */
 export async function deleteFile(userId: number, wsId: number, rel: string): Promise<void> {
-  const abs = resolveInWorkspace(userId, wsId, rel);
+  const abs = await secureResolve(userId, wsId, rel);
   if (abs === workspaceDir(userId, wsId)) {
     throw new BadRequestError("Refusing to delete the workspace root");
   }
@@ -183,7 +212,7 @@ export async function deleteFile(userId: number, wsId: number, rel: string): Pro
 
 /** Create a directory inside the workspace. */
 export async function makeDir(userId: number, wsId: number, rel: string): Promise<void> {
-  const abs = resolveInWorkspace(userId, wsId, rel);
+  const abs = await secureResolve(userId, wsId, rel);
   await mkdir(abs, { recursive: true });
 }
 
@@ -327,7 +356,7 @@ export async function move(
   fromRel: string,
   toRel: string,
 ): Promise<{ path: string }> {
-  const from = resolveInWorkspace(userId, wsId, fromRel);
+  const from = await secureResolve(userId, wsId, fromRel);
   const root = workspaceDir(userId, wsId);
   if (from === root) throw new BadRequestError("Refusing to move the workspace root");
   try {
@@ -339,7 +368,7 @@ export async function move(
   // Trailing slash (or ".") → target directory; keep the entry's name.
   const asDir = /\/$/.test(toRel) || toRel === "." || toRel === "./";
   const targetRel = asDir ? `${toRel.replace(/\/+$/, "")}/${name}` : toRel;
-  const to = resolveInWorkspace(userId, wsId, targetRel);
+  const to = await secureResolve(userId, wsId, targetRel);
   if (to === root || to === from) {
     throw new BadRequestError("Invalid move target");
   }

@@ -94,6 +94,23 @@ export class MockExecutor implements SandboxExecutor {
         logger.warn({ id: req.id, seedFromPath: req.seedFromPath, err: (err as Error).message }, "MockExecutor: workspace seed copy failed");
       }
     }
+    // Mount emulation (docs/沙盒输入输出挂载设计.md): the mock "container"
+    // runs commands on the host anyway, so /input and /output are plain
+    // directory SYMLINKS to the real platform-side dirs. Read-only is NOT
+    // enforced (dev-only approximation — the real executors use :ro binds).
+    if (req.mountDirs) {
+      const links: Array<[string, string]> = [["input", req.mountDirs.inputDir]];
+      if (req.mountDirs.outputDir) links.push(["output", req.mountDirs.outputDir]);
+      for (const [containerPath, hostDir] of links) {
+        try {
+          const link = join(root, containerPath);
+          await rm(link, { recursive: true, force: true });
+          await (await import("node:fs/promises")).symlink(hostDir, link, "junction");
+        } catch (err) {
+          logger.warn({ id: req.id, containerPath, err: (err as Error).message }, "MockExecutor: mount symlink failed (mounts inert in this dev run)");
+        }
+      }
+    }
     const handle: ContainerHandle = {
       id: req.id,
       node: "mock-local",

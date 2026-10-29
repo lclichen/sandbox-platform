@@ -99,6 +99,12 @@ export class SshExecutor implements SandboxExecutor {
   }
 
   async create(req: CreateRequest): Promise<ContainerHandle> {
+    if (req.mountDirs) {
+      // P2: remote staging for /input + tar-stream reclaim for /output. The
+      // platform-local dirs are meaningless on the execution node, so refuse
+      // instead of silently mounting wrong paths.
+      throw new Error("SSH 执行器暂不支持输入/输出挂载（P2：远端暂存 + tar 流回收）");
+    }
     const host = req.node ?? this.defaultHost!;
     await this.connect(host);
     const overlayPath = req.overlayPath ?? `${this.overlayBaseDir}/${req.id}.ext3`;

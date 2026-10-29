@@ -82,6 +82,22 @@ export interface CreateRequest {
    * (thin, unbounded — admin opt-in per image via images.overlay_kind).
    */
   overlayKind?: "ext3" | "dir";
+  /**
+   * Input/output mount dirs (docs/沙盒输入输出挂载设计.md):
+   *   inputDir  — host staging dir bound READ-ONLY at /input; the platform
+   *               materializes user-selected workspace items into it.
+   *   outputDir — host dir (inside the target user workspace) bound RW at
+   *               /output; writes reclaim into the workspace live.
+   * Executors render these as apptainer --bind flags at instance start and
+   * MUST re-apply them on every restart. P1: apptainer-cli + mock; the SSH
+   * executor rejects mounts until P2 (remote staging + tar-stream reclaim).
+   */
+  mountDirs?: {
+    inputDir: string;
+    /** Absent = inputs-only container: no /output bind (an RW bind over the
+     *  input staging dir would defeat its read-only contract). */
+    outputDir?: string;
+  };
 }
 
 export interface FileStat {

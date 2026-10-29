@@ -22,6 +22,7 @@
  * in-memory, scoped per user).
  */
 import { Router, type Request } from "express";
+import { z } from "zod";
 import { getDb, getExecutorFromReq, getLlmEnvProvider } from "../app.ts";
 import { createContainerService } from "../services/container.service.ts";
 import { createWorkspaceService } from "../services/workspace.service.ts";
@@ -30,6 +31,7 @@ import { UnauthorizedError } from "../utils/errors.ts";
 import { issuePtyTicket } from "../services/pty-tickets.ts";
 import {
   createContainerSchema,
+  addContainerInputSchema,
   listContainersSchema,
   createSnapshotSchema,
   idParamSchema,
@@ -116,7 +118,37 @@ export function containersRouter(): Router {
     const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
       .requireOwned(id, a.id, a.isAdmin)
-      .then((row) => res.json(svc._toPublic(row, a.isAdmin)))
+      .then(async (row) => {
+        const mounts = await svc.getMounts(id);
+        res.json({ ...svc._toPublic(row, a.isAdmin), mounts });
+      })
+      .catch(next);
+  });
+
+  // ---- input mounts (docs/沙盒输入输出挂载设计.md) ----
+  // Materialize one more workspace item into the ro /input staging dir; the
+  // bind makes it visible in a RUNNING container instantly (no restart).
+  router.post("/:id/inputs", (req, res, next) => {
+    const { id } = validate(idParamSchema, req.params);
+    const body = validate(addContainerInputSchema, req.body);
+    const a = actor(req);
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
+    svc
+      .addInput(id, a.id, body, a.isAdmin)
+      .then((mount) => res.status(201).json({ mount }))
+      .catch(next);
+  });
+
+  router.delete("/:id/inputs/:mountId", (req, res, next) => {
+    const { id, mountId } = validate(
+      z.object({ id: z.coerce.number().int().positive(), mountId: z.coerce.number().int().positive() }),
+      req.params,
+    );
+    const a = actor(req);
+    const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
+    svc
+      .removeInput(id, a.id, mountId, a.isAdmin)
+      .then(() => res.status(204).end())
       .catch(next);
   });
 

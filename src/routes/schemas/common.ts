@@ -124,6 +124,19 @@ export const createContainerSchema = z.object({
   diskGb: z.number().int().min(1).optional(),
   env: z.record(z.string(), z.string()).optional(),
   workspaceId: z.number().int().positive().optional(),
+  /** Input/output mounts (docs/沙盒输入输出挂载设计.md): selected workspace
+   *  items → ro /input staging; output workspace → live RW /output reclaim. */
+  mounts: z
+    .object({
+      inputs: z.array(z.object({ workspaceId: z.number().int().positive(), path: z.string().min(1).max(512) })).max(32).optional(),
+      output: z.object({ workspaceId: z.number().int().positive() }).optional(),
+    })
+    .optional(),
+});
+
+export const addContainerInputSchema = z.object({
+  workspaceId: z.number().int().positive(),
+  path: z.string().min(1).max(512),
 });
 
 export const listContainersSchema = paginationSchema.extend({
