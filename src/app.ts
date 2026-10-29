@@ -38,6 +38,7 @@ import { workspacesRouter } from "./routes/workspaces.routes.ts";
 import { snapshotsRouter } from "./routes/snapshots.routes.ts";
 import { auditMiddleware } from "./routes/audit.middleware.ts";
 import { adminRouter } from "./routes/admin.routes.ts";
+import { limitsRouter } from "./routes/limits.routes.ts";
 import { publicImagesRouter } from "./routes/images.public.routes.ts";
 import { publicLogsRouter } from "./routes/logs.public.routes.ts";
 import { llmAdminRouter } from "./routes/llm.admin.routes.ts";
@@ -227,6 +228,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   app.use("/api/v1/containers", containersRouter());
   app.use("/api/v1/containers", toolsRouter());
   app.use("/api/v1/workspaces", workspacesRouter());
+  app.use("/api/v1/limits", limitsRouter());
   app.use("/api/v1/snapshots", snapshotsRouter());
   app.use("/api/v1/images", publicImagesRouter());
   app.use("/api/v1/logs", publicLogsRouter());

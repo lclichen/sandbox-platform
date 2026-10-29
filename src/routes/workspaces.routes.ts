@@ -37,6 +37,7 @@ import {
   initUploadSchema,
 } from "./schemas/common.ts";
 import { validate } from "./validate.ts";
+import { effectiveWorkspaceUploadMaxBytes } from "../services/runtime-settings.ts";
 
 /**
  * Raw-body parser for single-file uploads. The global express.json() middleware
@@ -48,7 +49,7 @@ const rawUpload = Router().post(
   "/:id/files",
   (req, res, next) => {
     // Collect the raw body manually; works regardless of Content-Type.
-    const max = loadConfig().workspace.uploadMaxBytes;
+    const max = effectiveWorkspaceUploadMaxBytes();
     const chunks: Buffer[] = [];
     let received = 0;
     let rejected = false;
@@ -83,7 +84,7 @@ const rawPart = Router().put(
   (req, _res, next) => {
     // A part can reasonably be as large as the whole per-file cap; the total
     // across parts is enforced again at completion.
-    const max = loadConfig().workspace.uploadMaxBytes;
+    const max = effectiveWorkspaceUploadMaxBytes();
     const chunks: Buffer[] = [];
     let received = 0;
     req.on("data", (chunk: Buffer) => {

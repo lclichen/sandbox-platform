@@ -11,6 +11,7 @@ import { getDb, getExecutorFromReq } from "../app.ts";
 import { createLogService } from "../services/log.service.ts";
 import { createContainerService } from "../services/container.service.ts";
 import { requireAdmin } from "../auth/middleware.ts";
+import { setWorkspaceUploadMaxBytes, workspaceUploadLimitsView } from "../services/runtime-settings.ts";
 import { paginationSchema } from "./schemas/common.ts";
 import { validate } from "./validate.ts";
 import { z } from "zod";
@@ -74,6 +75,22 @@ export function adminRouter(): Router {
         res.json({ containers: rows.map((r) => svc._toPublic(r, true)) });
       })
       .catch(next);
+  });
+
+  // Runtime limits (no restart): workspace per-file upload cap.
+  // GET is available to every authenticated user via /api/v1/limits; the write
+  // side lives here so only admins can move the cap.
+  router.put("/limits", (req, res, next) => {
+    try {
+      const body = validate(
+        z.object({ workspaceUploadMaxBytes: z.union([z.number().int(), z.null()]) }),
+        req.body,
+      );
+      setWorkspaceUploadMaxBytes(body.workspaceUploadMaxBytes);
+      res.json(workspaceUploadLimitsView());
+    } catch (err) {
+      next(err);
+    }
   });
 
   return router;

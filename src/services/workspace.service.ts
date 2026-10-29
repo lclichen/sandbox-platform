@@ -16,6 +16,7 @@ import { createQuotaService } from "./quota.service.ts";
 import { NotFoundError, ConflictError, BadRequestError } from "../utils/errors.ts";
 import { logger } from "../utils/logger.ts";
 import { loadConfig } from "../config.ts";
+import { effectiveWorkspaceUploadMaxBytes } from "./runtime-settings.ts";
 import { nanoid } from "nanoid";
 import * as storage from "./workspace-storage.ts";
 import type { WorkspaceFileEntry } from "./workspace-storage.ts";
@@ -355,9 +356,9 @@ export function createWorkspaceService(db: Database) {
         throw new BadRequestError("Invalid filename");
       }
       const cfg = loadConfig();
-      if (input.size !== undefined && input.size > cfg.workspace.uploadMaxBytes) {
+      if (input.size !== undefined && input.size > effectiveWorkspaceUploadMaxBytes()) {
         throw new BadRequestError(
-          `File exceeds the per-file limit of ${cfg.workspace.uploadMaxBytes} bytes`,
+          `File exceeds the per-file limit of ${effectiveWorkspaceUploadMaxBytes()} bytes`,
         );
       }
       void storage.sweepStaleUploads(cfg.workspace.uploadTtlHours).catch(() => {});
@@ -372,7 +373,7 @@ export function createWorkspaceService(db: Database) {
       });
       // Part cap 8 MiB keeps a single request body bounded; sessions may span
       // as many parts as needed up to the total cap enforced at completion.
-      return { uploadId, partBytesMax: 8 * 1024 * 1024, maxBytes: cfg.workspace.uploadMaxBytes };
+      return { uploadId, partBytesMax: 8 * 1024 * 1024, maxBytes: effectiveWorkspaceUploadMaxBytes() };
     },
 
     /** Append one part to a session. The session must belong to this user. */
@@ -408,10 +409,10 @@ export function createWorkspaceService(db: Database) {
       const cfg = loadConfig();
       const parts = await storage.collectUploadParts(uploadId);
       const total = parts.reduce((sum, p) => sum + p.byteLength, 0);
-      if (total > cfg.workspace.uploadMaxBytes) {
+      if (total > effectiveWorkspaceUploadMaxBytes()) {
         await storage.removeUpload(uploadId).catch(() => {});
         throw new BadRequestError(
-          `Upload exceeds the per-file limit of ${cfg.workspace.uploadMaxBytes} bytes`,
+          `Upload exceeds the per-file limit of ${effectiveWorkspaceUploadMaxBytes()} bytes`,
         );
       }
       const rel = meta.dirRel ? `${meta.dirRel}/${meta.name}` : meta.name;
