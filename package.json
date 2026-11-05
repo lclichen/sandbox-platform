@@ -55,6 +55,7 @@
     "@types/ws": "^8.18.1",
     "supertest": "^7.3.1",
     "typescript": "^5.9.3",
+    "vite": "^7.3.7",
     "vitest": "^4.1.12"
   }
 }
