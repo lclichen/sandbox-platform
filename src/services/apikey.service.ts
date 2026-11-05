@@ -8,7 +8,7 @@
  */
 import { randomBytes, createHash } from "node:crypto";
 import type { Database } from "../db/driver.ts";
-import { NotFoundError } from "../utils/errors.ts";
+import { BadRequestError, NotFoundError } from "../utils/errors.ts";
 
 const PREFIX = "sk_";
 
@@ -54,6 +54,15 @@ export function createApiKeyService(db: Database) {
   return {
     /** Create a key for a user. Returns the plaintext once. */
     async create(userId: number, name: string): Promise<CreatedApiKey> {
+      // Bound the table: API keys never expire, so an authenticated client
+      // could otherwise mint rows without limit.
+      const active = await db.get<{ c: number }>(
+        "SELECT COUNT(*) AS c FROM api_keys WHERE user_id = ? AND revoked_at IS NULL",
+        userId,
+      );
+      if (Number(active?.c ?? 0) >= 50) {
+        throw new BadRequestError("API key limit reached (50 active keys); revoke unused keys first");
+      }
       const { plaintext, prefix, hash } = generateKey();
       const result = await db.run(
         `INSERT INTO api_keys (user_id, name, key_prefix, key_hash) VALUES (?, ?, ?, ?)`,

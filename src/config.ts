@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve as pathResolve } from "node:path";
+import type { ExecutorKind as ConcreteExecutorKind } from "./executors/types.ts";
 
 /**
  * Package root (the directory containing src/): data-dir DEFAULTS and any
@@ -49,7 +50,11 @@ function bool(name: string, fallback: boolean): boolean {
 }
 
 export type DbDialect = "sqlite" | "postgresql";
-export type ExecutorKind = "mock" | "ssh" | "apptainer-cli" | "auto";
+/**
+ * EXECUTOR_KIND additionally accepts "auto" (probe at startup). The concrete
+ * kinds come from the executor layer so the two unions cannot drift apart.
+ */
+export type ExecutorKind = ConcreteExecutorKind | "auto";
 export type RegisterMode = "off" | "open" | "approval";
 
 function asRegisterMode(value: string): RegisterMode {
@@ -113,6 +118,8 @@ export interface AppConfig {
     jwksUri: string | undefined;
     /** 允许回跳的 pi-web 地址前缀（OIDC_ALLOWED_REDIRECTS，逗号分隔）。 */
     allowedRedirectPrefixes: string[];
+    /** 显式允许明文 HTTP OIDC 端点（默认拒绝；仅限隔离内网测试）。 */
+    allowInsecureHttp: boolean;
   };
   register: {
     mode: RegisterMode;
@@ -132,6 +139,26 @@ export interface AppConfig {
     bashPerMinute: number;
     llmRevealPerMinute: number;
     registerPerMinute: number;
+    oidcPerMinute: number;
+    changePasswordPerMinute: number;
+  };
+  http: {
+    /** express.json body limit (e.g. "16mb"); applies to JSON requests only. */
+    jsonBodyLimit: string;
+  };
+  /** Per-request caps for the tools relay (read/grep/find/bash). */
+  tools: {
+    readMaxBytes: number;
+    grepMaxPatternChars: number;
+    grepMaxLineChars: number;
+    walkMaxFiles: number;
+    walkMaxDepth: number;
+    /** Wall-clock budget for one grep/find walk (default 60s). */
+    walkTimeoutMs: number;
+    /** Executor-side buffer cap for one bash call (stdout+stderr). */
+    bashOutputMaxBytes: number;
+    /** Upper bound accepted for a client-requested bash timeout. */
+    bashMaxTimeoutSeconds: number;
   };
   executor: {
     kind: ExecutorKind;
@@ -170,15 +197,34 @@ export interface AppConfig {
     maxPerContainer: number;
     /** Kill PTY sessions with no client traffic for this many minutes. */
     idleTimeoutMinutes: number;
+    /** WebSocket frame cap (bytes). */
+    maxFrameBytes: number;
+    /** Per-session input budget, sliding one-second window. */
+    inputBytesPerSecond: number;
+    /** Per-session lifetime input budget. */
+    inputBytesTotal: number;
   };
   /** R5: workspace file limits + chunked-upload retention. */
   workspace: {
-    /** Hard cap for a single uploaded file (bytes). */
+    /** Hard cap for a single uploaded file (bytes). Default 2 GiB. */
     uploadMaxBytes: number;
+    /** Cap for one chunked-upload part (bytes). */
+    uploadPartMaxBytes: number;
     /** Directory names skipped by the tree endpoint (comma-separated env). */
     treeIgnore: string[];
+    /** Maximum depth accepted by GET /workspaces/:id/tree. */
+    treeMaxDepth: number;
+    /** Maximum entries returned by one tree request. */
+    treeMaxEntries: number;
+    /** Cap for buffering a container /workspace export tar (bytes). */
+    exportMaxBytes: number;
     /** Incomplete chunked uploads older than this are swept (hours). */
     uploadTtlHours: number;
+  };
+  /** Per-container input/output mount caps. */
+  mounts: {
+    maxInputs: number;
+    maxInputBytes: number;
   };
   /** R6: one-click sandbox provisioning defaults for pi-web. */
   provision: {
@@ -195,6 +241,8 @@ export interface AppConfig {
     gateway: {
       /** agentgateway admin API (config resources + request logs). */
       adminUrl: string;
+      /** Optional bearer token for the admin API (AGENTGATEWAY_ADMIN_TOKEN). */
+      adminToken: string | undefined;
       /** OpenAI-compatible data-plane endpoint handed to users/containers. */
       publicBaseUrl: string;
       /** Per-request timeout for admin-API calls. */
@@ -256,6 +304,7 @@ export function loadConfig(): AppConfig {
       jwksUri: optional("OIDC_JWKS_URI"),
       allowedRedirectPrefixes: (required("OIDC_ALLOWED_REDIRECTS", ""))
         .split(",").map((x) => x.trim()).filter(Boolean),
+      allowInsecureHttp: bool("OIDC_ALLOW_INSECURE_HTTP", false),
     },
     register: {
       mode: asRegisterMode(required("REGISTER_MODE", "off")),
@@ -273,6 +322,22 @@ export function loadConfig(): AppConfig {
       bashPerMinute: int("RATE_LIMIT_BASH_PER_MINUTE", 60),
       llmRevealPerMinute: int("RATE_LIMIT_LLM_REVEAL_PER_MINUTE", 5),
       registerPerMinute: int("RATE_LIMIT_REGISTER_PER_MINUTE", 5),
+      oidcPerMinute: int("RATE_LIMIT_OIDC_PER_MINUTE", 300),
+      changePasswordPerMinute: int("RATE_LIMIT_CHANGE_PASSWORD_PER_MINUTE", 5),
+    },
+    http: {
+      jsonBodyLimit: required("HTTP_JSON_BODY_LIMIT", "16mb"),
+    },
+    tools: {
+      readMaxBytes: int("TOOLS_READ_MAX_BYTES", 2 * 1024 * 1024),
+      grepMaxPatternChars: int("TOOLS_GREP_MAX_PATTERN_CHARS", 1_000),
+      grepMaxLineChars: int("TOOLS_GREP_MAX_LINE_CHARS", 10_000),
+      walkMaxFiles: int("TOOLS_WALK_MAX_FILES", 20_000),
+      walkMaxDepth: int("TOOLS_WALK_MAX_DEPTH", 32),
+      // User-requested default: one minute per grep/find walk.
+      walkTimeoutMs: int("TOOLS_WALK_TIMEOUT_MS", 60_000),
+      bashOutputMaxBytes: int("TOOLS_BASH_OUTPUT_MAX_BYTES", 8 * 1024 * 1024),
+      bashMaxTimeoutSeconds: int("TOOLS_BASH_MAX_TIMEOUT_SECONDS", 3_600),
     },
     executor: {
       // "auto" (the default) probes ssh → apptainer-cli and hard-fails when
@@ -309,14 +374,27 @@ export function loadConfig(): AppConfig {
     pty: {
       maxPerContainer: int("PTY_MAX_PER_CONTAINER", 3),
       idleTimeoutMinutes: int("PTY_IDLE_TIMEOUT_MINUTES", 30),
+      maxFrameBytes: int("PTY_MAX_FRAME_BYTES", 1024 * 1024),
+      inputBytesPerSecond: int("PTY_INPUT_BYTES_PER_SECOND", 256 * 1024),
+      inputBytesTotal: int("PTY_INPUT_BYTES_TOTAL", 100 * 1024 * 1024),
     },
     workspace: {
-      uploadMaxBytes: int("WORKSPACE_UPLOAD_MAX_BYTES", 200 * 1024 * 1024),
+      // 2 GiB default (was 200 MiB). Uploads/downloads are streamed, so this
+      // is a policy cap rather than an in-memory buffer size.
+      uploadMaxBytes: int("WORKSPACE_UPLOAD_MAX_BYTES", 2 * 1024 * 1024 * 1024),
+      uploadPartMaxBytes: int("WORKSPACE_UPLOAD_PART_MAX_BYTES", 8 * 1024 * 1024),
       treeIgnore: required("WORKSPACE_TREE_IGNORE", "node_modules,.git,dist,build")
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean),
+      treeMaxDepth: int("WORKSPACE_TREE_MAX_DEPTH", 32),
+      treeMaxEntries: int("WORKSPACE_TREE_MAX_ENTRIES", 5_000),
+      exportMaxBytes: int("WORKSPACE_EXPORT_MAX_BYTES", 512 * 1024 * 1024),
       uploadTtlHours: int("WORKSPACE_UPLOAD_TTL_HOURS", 24),
+    },
+    mounts: {
+      maxInputs: int("CONTAINER_MAX_INPUT_MOUNTS", 32),
+      maxInputBytes: int("CONTAINER_MAX_INPUT_BYTES", 1024 * 1024 * 1024),
     },
     provision: {
       defaultImageId: int("PROVISION_DEFAULT_IMAGE_ID", 0),
@@ -328,6 +406,7 @@ export function loadConfig(): AppConfig {
       gateway: {
         // agentgateway admin API (config/resources + logs), NOT the data plane.
         adminUrl: required("AGENTGATEWAY_ADMIN_URL", "http://localhost:15000"),
+        adminToken: optional("AGENTGATEWAY_ADMIN_TOKEN"),
         // Data-plane OpenAI-compatible endpoint handed to clients/containers.
         publicBaseUrl: required("AGENTGATEWAY_LLM_PUBLIC_URL", "http://localhost:4000"),
         timeoutMs: int("AGENTGATEWAY_TIMEOUT_MS", 30000),
@@ -412,6 +491,26 @@ export function assertSecureProductionConfig(config: AppConfig): string[] {
     problems.push(
       "EXECUTOR_KIND=mock executes user shells ON THE PLATFORM HOST (no isolation). Set EXECUTOR_KIND=ssh or apptainer-cli in production.",
     );
+  }
+  if (!config.rateLimit.enabled) {
+    problems.push(
+      "RATE_LIMIT_ENABLED=false disables brute-force protection in production. Set it to true.",
+    );
+  }
+  if (config.oidc.enabled) {
+    if (!config.oidc.issuerUrl || !config.oidc.clientId) {
+      problems.push("OIDC_ENABLED=true requires OIDC_ISSUER_URL and OIDC_CLIENT_ID.");
+    }
+    if (config.oidc.allowedRedirectPrefixes.length === 0) {
+      problems.push(
+        "OIDC_ALLOWED_REDIRECTS is empty: any http(s) URL would receive the one-time login handoff. Set at least one https origin.",
+      );
+    }
+    if (!config.oidc.allowInsecureHttp && config.oidc.issuerUrl && !/^https:\/\//i.test(config.oidc.issuerUrl)) {
+      problems.push(
+        "OIDC_ISSUER_URL must use HTTPS in production (or set OIDC_ALLOW_INSECURE_HTTP=true for an isolated test network).",
+      );
+    }
   }
   // LLM integration (optional). When enabled in production, both the LiteLLM
   // master key and the local encryption key must be real secrets.

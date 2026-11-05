@@ -83,6 +83,8 @@ export interface SpendQuery {
 export interface GatewayClientOptions {
   /** Admin API base (e.g. http://127.0.0.1:15000). */
   adminUrl: string;
+  /** Optional bearer token; without it the admin API must be network-isolated. */
+  adminToken?: string;
   /** Data-plane base URL, used only for model listing fallback and docs. */
   publicBaseUrl: string;
   timeoutMs: number;
@@ -141,7 +143,11 @@ export function createLlmGatewayClient(opts: GatewayClientOptions): LlmGatewayCl
     try {
       res = await fetch(`${admin}${path}`, {
         method: init.method ?? "GET",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...(opts.adminToken ? { Authorization: `Bearer ${opts.adminToken}` } : {}),
+        },
         body: init.body === undefined ? undefined : JSON.stringify(init.body),
         signal: controller.signal,
       });

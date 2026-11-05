@@ -114,6 +114,13 @@ export interface ExecOptions {
   signal?: AbortSignal;
   /** Streaming callback for stdout+stderr chunks (Buffer). */
   onData?: (chunk: Buffer) => void;
+  /**
+   * Hard cap on buffered stdout+stderr bytes. Executors stop the process once
+   * the cap is exceeded and set ExecResult.outputTruncated. Without this a
+   * user command like `yes` could exhaust platform memory before the service
+   * layer ever got a chance to truncate the result.
+   */
+  maxOutputBytes?: number;
 }
 
 export interface ExecResult {
@@ -121,6 +128,8 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** True when maxOutputBytes stopped the command early. */
+  outputTruncated?: boolean;
 }
 
 export interface ExecStream {
@@ -180,7 +189,7 @@ export interface SandboxExecutor {
   exec(handle: ContainerHandle, command: string, opts?: ExecOptions): Promise<ExecResult>;
   /** Binary-safe exec (stdout as raw Buffer). Optional: executors that only
    *  produce utf8 output (SSH) may omit it; callers must fall back or reject. */
-  execBuffer?(handle: ContainerHandle, command: string): Promise<Buffer>;
+  execBuffer?(handle: ContainerHandle, command: string, opts?: { maxBytes?: number }): Promise<Buffer>;
 
   // ---- interactive terminal (R2). Optional so an executor can decline
   // (callers must treat "absent" as "terminal unsupported"); MockExecutor

@@ -23,6 +23,8 @@ export interface UserRow {
   updated_at: string;
   last_login_at: string | null;
   must_change_password: boolean | number;
+  /** C5: bumped on password change/reset; access tokens carry the old value. */
+  token_version: number;
 }
 
 export interface UserPublic {
@@ -38,9 +40,10 @@ export interface UserPublic {
 }
 
 export function toPublic(row: UserRow): UserPublic {
-  // Omit password_hash; normalize sqlite 0/1 to boolean.
-  const { password_hash: _omit, must_change_password: raw, ...rest } = row;
+  // Omit password_hash and the internal token_version; normalize sqlite 0/1 to boolean.
+  const { password_hash: _omit, token_version: _tv, must_change_password: raw, ...rest } = row;
   void _omit;
+  void _tv;
   return { ...rest, must_change_password: Number(raw) === 1 || raw === true };
 }
 

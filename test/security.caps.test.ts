@@ -96,7 +96,11 @@ describe("C4 tools resource caps", () => {
       .post(`/api/v1/containers/${containerId}/tools/grep`)
       .set("Authorization", `Bearer ${token}`)
       .send({ pattern: "(a+)+$", path: "." });
-    expect(res.status).toBeLessThan(300);
+    // The safe-regex gate rejects nested quantifiers up front (400
+    // UNSAFE_PATTERN); if a future engine accepts the pattern it must still
+    // return quickly thanks to the line-length cap. Either way: no hang.
+    expect(res.status).toBeLessThan(500);
+    if (res.status === 400) expect(res.body.code).toBe("UNSAFE_PATTERN");
     expect(Date.now() - began).toBeLessThan(15_000);
   }, 30_000);
 });

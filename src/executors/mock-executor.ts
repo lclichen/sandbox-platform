@@ -26,6 +26,7 @@ import type {
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
 import { BadRequestError } from "../utils/errors.ts";
+import { safeProcessEnvForMock } from "./safe-env.ts";
 
 export class MockExecutor implements SandboxExecutor {
   readonly kind: ExecutorKind = "mock";
@@ -244,6 +245,30 @@ export class MockExecutor implements SandboxExecutor {
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
+      let outputTruncated = false;
+      let outputBytes = 0;
+      const maxOutput = opts.maxOutputBytes && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : undefined;
+      const collect = (target: Buffer[], d: Buffer): void => {
+        if (maxOutput === undefined) {
+          target.push(d);
+          opts.onData?.(d);
+          return;
+        }
+        const remaining = maxOutput - outputBytes;
+        if (remaining <= 0) {
+          outputTruncated = true;
+          child.kill("SIGKILL");
+          return;
+        }
+        const accepted = d.byteLength > remaining ? d.subarray(0, remaining) : d;
+        target.push(accepted);
+        outputBytes += accepted.byteLength;
+        if (accepted.byteLength > 0) opts.onData?.(accepted);
+        if (accepted.byteLength < d.byteLength) {
+          outputTruncated = true;
+          child.kill("SIGKILL");
+        }
+      };
       const timer =
         opts.timeout && opts.timeout > 0
           ? setTimeout(() => {
@@ -252,14 +277,8 @@ export class MockExecutor implements SandboxExecutor {
             }, opts.timeout * 1000)
           : undefined;
 
-      child.stdout.on("data", (d: Buffer) => {
-        stdoutChunks.push(d);
-        opts.onData?.(d);
-      });
-      child.stderr.on("data", (d: Buffer) => {
-        stderrChunks.push(d);
-        opts.onData?.(d);
-      });
+      child.stdout.on("data", (d: Buffer) => collect(stdoutChunks, d));
+      child.stderr.on("data", (d: Buffer) => collect(stderrChunks, d));
       const onAbort = () => child.kill("SIGKILL");
       opts.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -271,6 +290,7 @@ export class MockExecutor implements SandboxExecutor {
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: Buffer.concat(stderrChunks).toString("utf8") + err.message,
           timedOut,
+          outputTruncated,
         });
       });
       child.on("close", (code) => {
@@ -281,6 +301,7 @@ export class MockExecutor implements SandboxExecutor {
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: Buffer.concat(stderrChunks).toString("utf8"),
           timedOut,
+          outputTruncated,
         });
       });
     });
@@ -420,45 +441,5 @@ function resolveShell(): string {
   return "cmd.exe";
 }
 
-/**
- * Minimal, non-secret process env for mock "container" shells: enough for the
- * shell and coreutils to run (PATH lookup, temp dirs, locale), nothing more.
- * The full process.env is off-limits — it contains the platform's own
- * JWT_SECRET / DB credentials / SSH password / LITELLM master key, and mock
- * commands are user-controlled (`env` would print them all).
- */
-const MOCK_ENV_KEYS = [
-  "PATH",
-  "HOME",
-  "TMP",
-  "TEMP",
-  "TMPDIR",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "TZ",
-  "TERM",
-  "USER",
-  "USERNAME",
-  "USERPROFILE",
-  "SystemRoot",
-  "SYSTEMROOT",
-  "SystemDrive",
-  "SYSTEMDRIVE",
-  "ComSpec",
-  "COMSPEC",
-  "windir",
-  "WINDIR",
-  "PATHEXT",
-  "NUMBER_OF_PROCESSORS",
-  "PROCESSOR_ARCHITECTURE",
-];
-
-export function safeProcessEnvForMock(): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const key of MOCK_ENV_KEYS) {
-    const value = process.env[key];
-    if (value !== undefined) out[key] = value;
-  }
-  return out;
-}
+// The safe allowlist lives in ./safe-env.ts so the local Apptainer PTY can use
+// the exact same policy (it previously spread the whole process.env).

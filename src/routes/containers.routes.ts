@@ -81,7 +81,7 @@ export function containersRouter(): Router {
     }
     const svc = createContainerService(getDb(req), getExecutorFromReq(req), getLlmEnvProvider(req));
     svc
-      .create(currentUserId(req), body)
+      .create(currentUserId(req), body, a.isAdmin)
       .then((row) => {
         const payload = svc._toPublic(row, a.isAdmin);
         // Cache success only — a failed attempt may succeed on retry.

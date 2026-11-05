@@ -6,7 +6,7 @@
  * in refresh_tokens so a stolen database cannot be replayed directly. Tokens
  * are SHA-256 hashed before storage.
  */
-import jwt from "jsonwebtoken";
+import jwt, { type SignOptions } from "jsonwebtoken";
 import { createHash } from "node:crypto";
 import { loadConfig } from "../config.ts";
 
@@ -45,12 +45,18 @@ export function signAccessToken(user: {
     tv: user.tokenVersion ?? 0,
     ...(user.mustChangePassword ? { pwd_change_required: true } : {}),
   };
-  return jwt.sign(claims, config.auth.jwtSecret, { expiresIn: config.auth.accessTtl });
+  return jwt.sign(claims, config.auth.jwtSecret, {
+    algorithm: "HS256",
+    expiresIn: config.auth.accessTtl as SignOptions["expiresIn"],
+  });
 }
 
 export function signRefreshToken(userId: number, jti: string): string {
   const claims: RefreshClaims = { sub: userId, type: "refresh", jti };
-  return jwt.sign(claims, config.auth.jwtSecret, { expiresIn: config.auth.refreshTtl });
+  return jwt.sign(claims, config.auth.jwtSecret, {
+    algorithm: "HS256",
+    expiresIn: config.auth.refreshTtl as SignOptions["expiresIn"],
+  });
 }
 
 export function verifyToken<T = unknown>(token: string): T {

@@ -11,10 +11,31 @@
  * host-escape bug present in the legacy MockExecutor.resolveIn. Unlike that
  * permissive helper, we NEVER allow escape here.
  */
-import { mkdir, rm, readdir, stat, rename, readFile as fsReadFile, writeFile as fsWriteFile, access as fsAccess } from "node:fs/promises";
+import {
+  mkdir,
+  rm,
+  readdir,
+  stat,
+  lstat,
+  rename,
+  readFile as fsReadFile,
+  writeFile as fsWriteFile,
+  access as fsAccess,
+} from "node:fs/promises";
+import { createReadStream as fsCreateReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { Transform, type Readable } from "node:stream";
+import { once } from "node:events";
+import { randomUUID } from "node:crypto";
 import { join, resolve, posix as posixPath, dirname as pathDirname, sep } from "node:path";
 import { loadConfig } from "../config.ts";
-import { BadRequestError, NotFoundError } from "../utils/errors.ts";
+import { effectiveWorkspaceUploadMaxBytes } from "./runtime-settings.ts";
+import { BadRequestError, HttpError, NotFoundError } from "../utils/errors.ts";
+
+/** Effective cap for one chunked-upload request (env: WORKSPACE_UPLOAD_PART_MAX_BYTES). */
+export function uploadPartMaxBytes(): number {
+  return loadConfig().workspace.uploadPartMaxBytes;
+}
 
 export interface WorkspaceFileEntry {
   name: string;
@@ -121,10 +142,53 @@ async function assertRealWithin(root: string, candidate: string): Promise<void> 
 
 const realpathNative = (p: string) => import("node:fs/promises").then((m) => m.realpath(p));
 
+async function lstatOrNull(p: string): Promise<Awaited<ReturnType<typeof lstat>> | null> {
+  try {
+    return await lstat(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reject ANY symlink component between the workspace root and `candidate`
+ * (including a dangling final symlink). The old check only realpath'd the
+ * final target, so `link -> C:\\outside` as a PARENT directory still let
+ * writeFile/makeDir/move escape: the final file did not exist yet, realpath
+ * returned null, and the operation created files outside the workspace.
+ *
+ * The workspace root itself is trusted (deployments may symlink
+ * WORKSPACE_BASE_DIR); every component below it must be a real directory/file.
+ */
+export async function assertNoSymlinkComponents(root: string, candidate: string): Promise<void> {
+  const rootAbs = resolve(root);
+  const realRoot = (await realpathNative(rootAbs).catch(() => null)) ?? rootAbs;
+  let cur = resolve(candidate);
+  for (;;) {
+    if (cur === rootAbs) return; // reached the trusted root
+    const st = await lstatOrNull(cur);
+    if (st) {
+      if (st.isSymbolicLink()) {
+        throw new BadRequestError("路径包含符号链接（已拒绝，防止逃逸工作区）");
+      }
+      const real = await realpathNative(cur).catch(() => null);
+      if (!real || (real !== realRoot && !real.startsWith(realRoot + sep))) {
+        throw new BadRequestError("路径解析到工作区之外（符号链接被拒绝）");
+      }
+      return;
+    }
+    const parent = pathDirname(cur);
+    if (parent === cur) return;
+    cur = parent;
+  }
+}
+
 /** Resolve + realpath-verify a workspace path (containment on both layers). */
-async function secureResolve(userId: number, wsId: number, rel: string): Promise<string> {
+export async function secureResolve(userId: number, wsId: number, rel: string): Promise<string> {
   const abs = resolveInWorkspace(userId, wsId, rel);
-  await assertRealWithin(workspaceDir(userId, wsId), abs);
+  const root = workspaceDir(userId, wsId);
+  await assertNoSymlinkComponents(root, abs);
+  await assertRealWithin(root, abs);
   return abs;
 }
 
@@ -150,7 +214,9 @@ export async function listFiles(
     const full = join(dir, entry.name);
     let s;
     try {
-      s = await stat(full);
+      // lstat, not stat: a symlink entry must report its own (zero-ish) size
+      // instead of leaking the size/mtime of an arbitrary host target.
+      s = await lstat(full);
     } catch {
       continue; // skip entries that disappear mid-walk
     }
@@ -159,7 +225,7 @@ export async function listFiles(
       name: entry.name,
       path: hostRel.replace(/^\/+/, ""),
       isDir: entry.isDirectory(),
-      size: s.isDirectory() ? 0 : s.size,
+      size: entry.isDirectory() || s.isSymbolicLink() ? 0 : s.size,
       mtime: s.mtime.toISOString(),
     });
   }
@@ -179,8 +245,165 @@ export async function writeFile(
   content: Buffer,
 ): Promise<void> {
   const abs = await secureResolve(userId, wsId, rel);
-  await mkdir(pathDirname(abs), { recursive: true });
+  const parent = pathDirname(abs);
+  await mkdir(parent, { recursive: true });
+  // Re-check after mkdir: the path was absent during secureResolve, so this
+  // is the first point where every parent exists and can be verified. A
+  // container racing a symlink into the tree is rejected here (no write).
+  await assertNoSymlinkComponents(workspaceDir(userId, wsId), parent);
   await fsWriteFile(abs, content);
+}
+
+/** Size of a regular file inside the workspace (lstat — never a symlink target). */
+export async function fileSize(userId: number, wsId: number, rel: string): Promise<number> {
+  const abs = await secureResolve(userId, wsId, rel);
+  const s = await lstat(abs).catch(() => null);
+  if (!s || !s.isFile()) throw new NotFoundError("Workspace file", rel);
+  return Number(s.size);
+}
+
+/** Resolve a downloadable file + its size (no buffering). */
+export async function resolveDownloadFile(
+  userId: number,
+  wsId: number,
+  rel: string,
+): Promise<{ abs: string; size: number }> {
+  const abs = await secureResolve(userId, wsId, rel);
+  const s = await lstat(abs).catch(() => null);
+  if (!s || !s.isFile()) throw new NotFoundError("Workspace file", rel);
+  return { abs, size: Number(s.size) };
+}
+
+/** Ensure the target's parent exists and still has no symlink components. */
+async function prepareTarget(userId: number, wsId: number, rel: string): Promise<string> {
+  const abs = await secureResolve(userId, wsId, rel);
+  const parent = pathDirname(abs);
+  await mkdir(parent, { recursive: true });
+  await assertNoSymlinkComponents(workspaceDir(userId, wsId), parent);
+  return abs;
+}
+
+/**
+ * Move a staged temp file into place. On POSIX rename replaces atomically.
+ * Windows' MoveFileEx is also replace-capable in libuv; the fallback only
+ * handles filesystems that refuse to replace, without touching directories.
+ */
+async function commitStagedFile(tmp: string, abs: string): Promise<void> {
+  try {
+    await rename(tmp, abs);
+  } catch (err) {
+    const existing = await lstat(abs).catch(() => null);
+    if (!existing || !existing.isFile()) throw err;
+    await rm(abs, { force: true });
+    await rename(tmp, abs);
+  }
+}
+
+/**
+ * Stream an upload body into the workspace without buffering it in memory.
+ * The body is written to a staging file first, the caller's `beforeCommit`
+ * (aggregate-disk quota) runs, and only then is it renamed over the target.
+ * A failed/aborted upload never destroys an existing file.
+ */
+export async function writeFileFromStream(
+  userId: number,
+  wsId: number,
+  rel: string,
+  input: Readable,
+  maxBytes: number,
+  beforeCommit?: (size: number) => Promise<void>,
+): Promise<{ size: number }> {
+  const abs = await prepareTarget(userId, wsId, rel);
+  const tmpDir = uploadsRoot();
+  await mkdir(tmpDir, { recursive: true });
+  const tmp = join(tmpDir, `stream-${randomUUID()}.tmp`);
+  let received = 0;
+  const counter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      received += chunk.byteLength;
+      if (received > maxBytes) {
+        callback(new HttpError(413, "UPLOAD_TOO_LARGE", `upload exceeds the ${maxBytes}-byte limit`));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+  try {
+    await pipeline(input, counter, createWriteStream(tmp, { flags: "wx", mode: 0o600 }));
+    if (beforeCommit) await beforeCommit(received);
+    await commitStagedFile(tmp, abs);
+    return { size: received };
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    if ((err as NodeJS.ErrnoException)?.code === "ERR_STREAM_PREMATURE_CLOSE") {
+      throw new BadRequestError("upload aborted by client");
+    }
+    throw err;
+  }
+}
+
+/**
+ * Concatenate a completed chunked upload into the target file using streams.
+ * Parts are read one at a time (8 MiB default), so completing a 2 GiB file
+ * never materializes 2 GiB in the process heap.
+ */
+export async function writeUploadPartsToFile(
+  uploadId: string,
+  userId: number,
+  wsId: number,
+  rel: string,
+  maxBytes: number,
+  beforeCommit?: (size: number) => Promise<void>,
+): Promise<{ size: number }> {
+  const abs = await prepareTarget(userId, wsId, rel);
+  const dir = join(uploadsRoot(), uploadId);
+  let names: string[];
+  try {
+    names = (await readdir(dir)).filter((n) => n.startsWith("part-")).sort();
+  } catch {
+    throw new NotFoundError("Upload session", uploadId);
+  }
+  if (names.length === 0) throw new BadRequestError("Upload session has no parts");
+
+  const tmpDir = uploadsRoot();
+  await mkdir(tmpDir, { recursive: true });
+  const tmp = join(tmpDir, `complete-${randomUUID()}.tmp`);
+  const out = createWriteStream(tmp, { flags: "wx", mode: 0o600 });
+  // A Writable with no error listener crashes the process on ENOSPC/EIO.
+  // Keep the error and surface it from the read loop.
+  let writeError: Error | undefined;
+  out.on("error", (err) => {
+    writeError = err;
+  });
+  let total = 0;
+  try {
+    for (const name of names) {
+      const partPath = join(dir, name);
+      const s = await lstat(partPath).catch(() => null);
+      if (!s?.isFile()) continue;
+      total += Number(s.size);
+      if (total > maxBytes) {
+        throw new HttpError(413, "UPLOAD_TOO_LARGE", `upload exceeds the ${maxBytes}-byte limit`);
+      }
+      for await (const chunk of fsCreateReadStream(partPath)) {
+        if (writeError) throw writeError;
+        if (!out.write(chunk)) await once(out, "drain");
+      }
+      if (writeError) throw writeError;
+    }
+    if (writeError) throw writeError;
+    await new Promise<void>((resolve, reject) => {
+      out.once("error", reject);
+      out.end(() => resolve());
+    });
+    if (beforeCommit) await beforeCommit(total);
+    await commitStagedFile(tmp, abs);
+    return { size: total };
+  } catch (err) {
+    out.destroy();
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }
 
 /** Read a file inside the workspace as a Buffer. */
@@ -214,6 +437,7 @@ export async function deleteFile(userId: number, wsId: number, rel: string): Pro
 export async function makeDir(userId: number, wsId: number, rel: string): Promise<void> {
   const abs = await secureResolve(userId, wsId, rel);
   await mkdir(abs, { recursive: true });
+  await assertNoSymlinkComponents(workspaceDir(userId, wsId), abs);
 }
 
 /** Recursively compute total bytes + file count for a workspace (for listings). */
@@ -232,12 +456,16 @@ export async function statWorkspace(
       return;
     }
     for (const entry of entries) {
+      // Never follow symlinks: a planted link could otherwise make the
+      // workspace's recorded size include arbitrary host files (quota evasion
+      // and an information leak about their existence/size).
+      if (entry.isSymbolicLink()) continue;
       const full = join(d, entry.name);
       if (entry.isDirectory()) {
         await walk(full);
       } else if (entry.isFile()) {
         try {
-          sizeBytes += (await stat(full)).size;
+          sizeBytes += (await lstat(full)).size;
           fileCount += 1;
         } catch {
           // ignore
@@ -285,7 +513,7 @@ export async function walkTree(
   rel: string,
   opts: TreeOptions,
 ): Promise<TreeResult> {
-  const rootDir = resolveInWorkspace(userId, wsId, rel);
+  const rootDir = await secureResolve(userId, wsId, rel);
   const root = workspaceDir(userId, wsId);
   const entries: TreeEntry[] = [];
   let truncated = false;
@@ -307,10 +535,13 @@ export async function walkTree(
       const hostRel = full.slice(root.length).split(sep).join("/").replace(/^\/+/, "");
       let s;
       try {
-        s = await stat(full);
+        s = await lstat(full);
       } catch {
         continue;
       }
+      // Do not expose symlink targets through the tree API (and never descend
+      // into them); the storage layer refuses them for reads/writes anyway.
+      if (s.isSymbolicLink()) continue;
       const entry: TreeEntry = {
         name: dirent.name,
         path: hostRel,
@@ -378,6 +609,7 @@ export async function move(
   }
   const hostToRel = to.slice(root.length).split(sep).join("/").replace(/^\/+/, "");
   await mkdir(dirname(to), { recursive: true });
+  await assertNoSymlinkComponents(root, dirname(to));
   await rename(from, to);
   return { path: hostToRel };
 }
@@ -397,6 +629,8 @@ export interface UploadMeta {
   dirRel: string;
   /** Declared total size (optional; enforcement uses actual bytes). */
   size?: number;
+  /** Bytes persisted so far, maintained by writeUploadPart (disk-bound cap). */
+  receivedBytes?: number;
   createdAt: number;
 }
 
@@ -406,13 +640,19 @@ async function uploadDir(uploadId: string): Promise<string> {
   return dir;
 }
 
+async function writeUploadMeta(uploadId: string, meta: UploadMeta): Promise<void> {
+  const dir = await uploadDir(uploadId);
+  const tmp = join(dir, "meta.json.tmp");
+  await fsWriteFile(tmp, JSON.stringify(meta), "utf8");
+  await rename(tmp, join(dir, "meta.json"));
+}
+
 /** Create an upload session and return its id (meta is kept next to the parts). */
 export async function createUpload(
   meta: Omit<UploadMeta, "createdAt">,
 ): Promise<UploadMeta & { createdAt: number }> {
-  const withTime = { ...meta, createdAt: Date.now() };
-  const dir = await uploadDir(meta.uploadId);
-  await fsWriteFile(join(dir, "meta.json"), JSON.stringify(withTime), "utf8");
+  const withTime = { ...meta, createdAt: Date.now(), receivedBytes: 0 };
+  await writeUploadMeta(meta.uploadId, withTime);
   return withTime;
 }
 
@@ -427,7 +667,14 @@ export async function readUpload(uploadId: string): Promise<UploadMeta | null> {
   }
 }
 
-/** Store one numbered part (raw bytes). Parts are opaque until completion. */
+/**
+ * Store one numbered part (raw bytes). Parts are opaque until completion.
+ *
+ * SECURITY: each part and the session total are capped HERE, not only at
+ * completion. Previously a client could stream unlimited 8 MiB parts into
+ * .uploads (the total was checked only after every part had hit disk), which
+ * let any authenticated user fill the platform volume.
+ */
 export async function writeUploadPart(
   uploadId: string,
   part: number,
@@ -436,26 +683,45 @@ export async function writeUploadPart(
   if (!Number.isInteger(part) || part < 1 || part > 100_000) {
     throw new BadRequestError("Part number must be an integer in [1, 100000]");
   }
+  const partMax = uploadPartMaxBytes();
+  if (content.byteLength > partMax) {
+    throw new HttpError(413, "UPLOAD_TOO_LARGE", `upload part exceeds ${partMax} bytes`);
+  }
   const meta = await readUpload(uploadId);
   if (!meta) throw new NotFoundError("Upload session", uploadId);
   const dir = await uploadDir(uploadId);
-  await fsWriteFile(join(dir, `part-${String(part).padStart(6, "0")}`), content);
+  const partPath = join(dir, `part-${String(part).padStart(6, "0")}`);
+  const existing = await lstatOrNull(partPath);
+  const previousBytes = existing?.isFile() ? Number(existing.size) : 0;
+  // Sessions created before receivedBytes existed have no counter; measure the
+  // parts that are already on disk so a legacy session cannot bypass the cap.
+  const alreadyStored = meta.receivedBytes ?? (await sumStoredParts(uploadId));
+  const nextTotal = alreadyStored + content.byteLength - previousBytes;
+  const maxBytes = effectiveWorkspaceUploadMaxBytes();
+  if (nextTotal > maxBytes) {
+    throw new HttpError(413, "UPLOAD_TOO_LARGE", `upload exceeds the ${maxBytes}-byte limit`);
+  }
+  await fsWriteFile(partPath, content);
+  await writeUploadMeta(uploadId, { ...meta, receivedBytes: Math.max(0, nextTotal) });
   return content.byteLength;
 }
 
-/** Concatenate stored parts (in part-number order) into ordered buffers. */
-export async function collectUploadParts(uploadId: string): Promise<Buffer[]> {
+
+/** Sum every stored part's size (used for legacy sessions without receivedBytes). */
+async function sumStoredParts(uploadId: string): Promise<number> {
   const dir = join(uploadsRoot(), uploadId);
   let names: string[];
   try {
-    names = (await readdir(dir)).filter((n) => n.startsWith("part-")).sort();
+    names = (await readdir(dir)).filter((n) => n.startsWith("part-"));
   } catch {
-    throw new NotFoundError("Upload session", uploadId);
+    return 0;
   }
-  if (names.length === 0) throw new BadRequestError("Upload session has no parts");
-  const chunks: Buffer[] = [];
-  for (const n of names) chunks.push(await fsReadFile(join(dir, n)));
-  return chunks;
+  let total = 0;
+  for (const n of names) {
+    const s = await lstat(join(dir, n)).catch(() => null);
+    if (s?.isFile()) total += Number(s.size);
+  }
+  return total;
 }
 
 /** Remove the upload session directory (after completion or on abort). */

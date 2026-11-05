@@ -62,7 +62,20 @@ export async function authenticateCredential(
     }
     const claims = verifyToken<AccessClaims>(credential);
     if (claims.type !== "access") return null;
-    return claims;
+    // Non-HTTP consumers (PTY upgrades, future relays) must see the SAME live
+    // user state as requireAuth — a signed JWT alone is a point-in-time
+    // snapshot and would keep a disabled/demoted user privileged.
+    const row = await createUserService(db).getById(claims.sub);
+    if (!row || row.status !== "active") return null;
+    if ((claims.tv ?? 0) !== (Number(row.token_version) || 0)) return null;
+    return {
+      ...claims,
+      username: row.username,
+      role: row.role,
+      ...(Number(row.must_change_password) === 1 || row.must_change_password === true
+        ? { pwd_change_required: true }
+        : {}),
+    };
   } catch {
     return null;
   }
@@ -76,7 +89,17 @@ async function claimsFromApiKey(db: Database, plaintext: string): Promise<Access
   const users = createUserService(db);
   const user = await users.getById(auth.userId);
   if (!user || user.status !== "active") return null;
-  return { sub: user.id, username: user.username, role: user.role, type: "access" };
+  return {
+    sub: user.id,
+    username: user.username,
+    role: user.role,
+    type: "access",
+    // API keys must obey the same must-change-password gate as JWTs; otherwise
+    // a pre-existing key is a trivial bypass of the R9 lockout.
+    ...(Number(user.must_change_password) === 1 || user.must_change_password === true
+      ? { pwd_change_required: true }
+      : {}),
+  };
 }
 
 export function requireAuth(): RequestHandler {
@@ -109,6 +132,11 @@ export function requireAuth(): RequestHandler {
         if ((claims.tv ?? 0) !== (Number(row.token_version) || 0)) {
           return next(new UnauthorizedError("Token superseded by a credential change; log in again"));
         }
+        // Role/username are DB-owned, not token-owned: a demoted admin must lose
+        // admin endpoints immediately instead of at token expiry, and a renamed
+        // account must not keep acting under its old identity in audit rows.
+        claims.role = row.role;
+        claims.username = row.username;
         const owesChange = Number(row.must_change_password) === 1 || row.must_change_password === true;
         if (owesChange && !claims.pwd_change_required) claims.pwd_change_required = true;
       }

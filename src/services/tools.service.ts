@@ -14,20 +14,26 @@ import { createContainerService } from "./container.service.ts";
 import { truncate } from "../utils/truncate.ts";
 import { HttpError } from "../utils/errors.ts";
 import { posix as posixPath } from "node:path";
+import safeRegex from "safe-regex2";
+import { loadConfig } from "../config.ts";
 
 // Resource caps (fix plan C4). The platform is a single multi-tenant process:
 // every one of these bounds a user-controllable input that could otherwise
 // balloon memory or pin the event loop (unbounded stderr, whole-file reads of
 // huge files, catastrophic-backtracking regexes on long lines, unbounded
-// directory walks).
-const READ_MAX_BYTES = 2 * 1024 * 1024;
-const GREP_MAX_PATTERN_CHARS = 1_000;
-/** Truncating each line before regex execution defuses ReDoS amplification:
- *  catastrophic backtracking needs long input, and no useful match line is
- *  larger than this. */
-const GREP_MAX_LINE_CHARS = 10_000;
-const WALK_MAX_FILES = 20_000;
-const WALK_MAX_DEPTH = 32;
+// directory walks). They are env-configurable — see docs/LIMITS.md.
+export function toolLimits() {
+  return loadConfig().tools;
+}
+
+/** Reject a bash timeout above the configured ceiling (routes validate too). */
+export function assertBashTimeout(timeout: number | undefined): void {
+  if (timeout === undefined) return;
+  const max = toolLimits().bashMaxTimeoutSeconds;
+  if (timeout > max) {
+    throw new HttpError(400, "TIMEOUT_TOO_LARGE", `bash timeout exceeds the ${max}-second limit`);
+  }
+}
 
 export interface ReadResult {
   contentBase64: string;
@@ -63,6 +69,7 @@ export interface LsEntry {
 
 export function createToolsService(db: Database, executor: SandboxExecutor) {
   const containers = createContainerService(db, executor);
+  const limits = toolLimits();
 
   async function resolve(cid: number, userId: number) {
     return containers.resolveRunningHandle(cid, userId);
@@ -73,8 +80,8 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
   async function readCapped(handle: ContainerHandle, path: string): Promise<Buffer> {
     try {
       const s = await executor.stat(handle, path);
-      if (s.size > READ_MAX_BYTES) {
-        throw new HttpError(413, "FILE_TOO_LARGE", `File is larger than the ${READ_MAX_BYTES}-byte read cap`);
+      if (s.size > limits.readMaxBytes) {
+        throw new HttpError(413, "FILE_TOO_LARGE", `File is larger than the ${limits.readMaxBytes}-byte read cap`);
       }
     } catch (err) {
       if (err instanceof HttpError) throw err;
@@ -82,8 +89,8 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
       // canonical error shape.
     }
     const buf = await executor.readFile(handle, path);
-    if (buf.length > READ_MAX_BYTES) {
-      throw new HttpError(413, "FILE_TOO_LARGE", `File is larger than the ${READ_MAX_BYTES}-byte read cap`);
+    if (buf.length > limits.readMaxBytes) {
+      throw new HttpError(413, "FILE_TOO_LARGE", `File is larger than the ${limits.readMaxBytes}-byte read cap`);
     }
     return buf;
   }
@@ -158,8 +165,12 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
       command: string,
       opts: { cwd?: string; timeout?: number; env?: Record<string, string> } = {},
     ): Promise<BashResult> {
+      assertBashTimeout(opts.timeout);
       const { handle } = await resolve(cid, userId);
-      const result = await executor.exec(handle, command, opts);
+      const result = await executor.exec(handle, command, {
+        ...opts,
+        maxOutputBytes: limits.bashOutputMaxBytes,
+      });
       const truncated = truncate(result.stdout, { maxBytes: 50000, maxLines: 2000 });
       // stderr is just as user-controllable as stdout (`ls / >&2`) and used to
       // flow back uncapped into the JSON response.
@@ -169,20 +180,35 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
         stderr: truncatedErr.content,
         exitCode: result.exitCode,
         timedOut: result.timedOut,
-        truncated: truncated.truncated || truncatedErr.truncated,
+        truncated: truncated.truncated || truncatedErr.truncated || result.outputTruncated === true,
       };
     },
 
     async grep(cid: number, userId: number, params: GrepParams): Promise<string> {
       const { handle } = await resolve(cid, userId);
-      if (params.pattern.length > GREP_MAX_PATTERN_CHARS) {
-        throw new HttpError(400, "PATTERN_TOO_LONG", `grep pattern exceeds ${GREP_MAX_PATTERN_CHARS} characters`);
+      if (params.pattern.length > limits.grepMaxPatternChars) {
+        throw new HttpError(400, "PATTERN_TOO_LONG", `grep pattern exceeds ${limits.grepMaxPatternChars} characters`);
+      }
+      // Reject patterns with nested quantifiers/backrefs before they reach the
+      // main-thread RegExp engine. Truncating each line bounds input, but does
+      // NOT prevent classic exponential backtracking on a 10 KB line.
+      if (!params.literal && !safeRegex(params.pattern)) {
+        throw new HttpError(
+          400,
+          "UNSAFE_PATTERN",
+          "grep pattern is potentially catastrophic (nested quantifiers/backreferences); use a simpler pattern or literal:true",
+        );
       }
       // Portable pure-JS implementation: walk files via executor primitives so
       // it works identically on Mock (win32) and real (Linux) executors,
       // without depending on the container having `grep` installed.
       const root = params.path ?? ".";
-      const matcher = buildLineMatcher(params.pattern, params.literal, params.ignoreCase);
+      let matcher: (line: string) => boolean;
+      try {
+        matcher = buildLineMatcher(params.pattern, params.literal, params.ignoreCase);
+      } catch {
+        throw new HttpError(400, "INVALID_PATTERN", "grep pattern is not a valid regular expression");
+      }
       const limit = params.limit ?? 100;
       const output: string[] = [];
       let matchCount = 0;
@@ -193,7 +219,7 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
         let content: string;
         try {
           const buf = await executor.readFile(handle, posixPath.join(root, fileRel));
-          if (buf.length > READ_MAX_BYTES) return true; // skip huge files
+          if (buf.length > limits.readMaxBytes) return true; // skip huge files
           content = buf.toString("utf8");
         } catch {
           return true;
@@ -202,7 +228,7 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
         for (let i = 0; i < lines.length; i++) {
           const raw = lines[i] ?? "";
           // Truncate BEFORE the regex: bounded input bounds backtracking.
-          const line = raw.length > GREP_MAX_LINE_CHARS ? raw.slice(0, GREP_MAX_LINE_CHARS) : raw;
+          const line = raw.length > limits.grepMaxLineChars ? raw.slice(0, limits.grepMaxLineChars) : raw;
           if (matcher(line)) {
             output.push(`${fileRel}:${i + 1}:${line}`);
             matchCount++;
@@ -210,7 +236,7 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
           }
         }
         return true;
-      });
+      }, limits.walkTimeoutMs > 0 ? Date.now() + limits.walkTimeoutMs : Number.POSITIVE_INFINITY, limits);
       return output.join("\n");
     },
 
@@ -226,7 +252,7 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
           if (results.length >= limit) return false;
         }
         return true;
-      });
+      }, limits.walkTimeoutMs > 0 ? Date.now() + limits.walkTimeoutMs : Number.POSITIVE_INFINITY, limits);
       return results;
     },
   };
@@ -268,11 +294,14 @@ async function walkFiles(
   handle: ContainerHandle,
   root: string,
   visit: (rel: string) => Promise<boolean>,
+  deadline: number | undefined,
+  limits: { walkMaxFiles: number; walkMaxDepth: number },
 ): Promise<void> {
   const queue: Array<{ dir: string; rel: string; depth: number }> = [{ dir: root, rel: "", depth: 0 }];
   const visited = new Set<string>();
   let files = 0;
   while (queue.length > 0) {
+    if (deadline !== undefined && Date.now() > deadline) return;
     const { dir, rel, depth } = queue.shift()!;
     let names: string[];
     try {
@@ -281,6 +310,7 @@ async function walkFiles(
       continue;
     }
     for (const name of names) {
+      if (deadline !== undefined && Date.now() > deadline) return;
       if (name === ".git" || name === "node_modules") continue;
       const childAbs = posixPath.join(dir, name);
       const childRel = rel ? posixPath.join(rel, name) : name;
@@ -294,12 +324,12 @@ async function walkFiles(
         continue;
       }
       if (isDir) {
-        if (depth + 1 <= WALK_MAX_DEPTH) {
+        if (depth + 1 <= limits.walkMaxDepth) {
           queue.push({ dir: childAbs, rel: childRel, depth: depth + 1 });
         }
       } else {
         files += 1;
-        if (files > WALK_MAX_FILES) return;
+        if (files > limits.walkMaxFiles) return;
         if (!(await visit(childRel))) return;
       }
     }

@@ -71,8 +71,6 @@ function createExecutor(kind: ExecutorKind): SandboxExecutor {
       return new SshExecutor();
     case "apptainer-cli":
       return new ApptainerCliExecutor();
-    case "auto":
-      throw new Error("auto must be resolved to a concrete kind before createExecutor");
   }
 }
 

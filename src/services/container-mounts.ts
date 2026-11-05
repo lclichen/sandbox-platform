@@ -14,11 +14,11 @@
  * callers only ever pass (workspaceId, relPath) pairs validated against the
  * workspace storage layer's containment rules.
  */
-import { cp, lstat, mkdir, readdir, rm, stat, realpath } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, rm, realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { loadConfig } from "../config.ts";
 import { BadRequestError, NotFoundError } from "../utils/errors.ts";
-import { resolveInWorkspace, workspaceDir } from "./workspace-storage.ts";
+import { secureResolve } from "./workspace-storage.ts";
 
 /** Per-container input staging root: sibling of the workspaces base dir. */
 export function containerInputBase(): string {
@@ -46,13 +46,13 @@ export function outputRelDir(containerName: string): string {
   return `outputs/${sanitizeMountName(containerName) || "container"}`;
 }
 
-export function outputDirFor(userId: number, workspaceId: number, containerName: string): string {
-  return resolveInWorkspace(userId, workspaceId, outputRelDir(containerName));
-}
-
 export async function ensureOutputDir(userId: number, workspaceId: number, containerName: string): Promise<string> {
-  const dir = outputDirFor(userId, workspaceId, containerName);
+  // secureResolve rejects symlinks in every component: a previous container
+  // could have planted `outputs -> C:\outside` through its RW bind, and a
+  // plain mkdir would then create the new output dir OUTSIDE the workspace.
+  const dir = await secureResolve(userId, workspaceId, outputRelDir(containerName));
   await mkdir(dir, { recursive: true });
+  await assertDirHasNoSymlinks(dir);
   return dir;
 }
 
@@ -74,7 +74,10 @@ export async function resolveInputSource(
   workspaceId: number,
   relPath: string,
 ): Promise<{ hostPath: string; name: string; isDir: boolean; sizeBytes: number }> {
-  const hostPath = resolveInWorkspace(userId, workspaceId, relPath);
+  // secureResolve rejects symlinks in ANY component, not just the selected
+  // item: mounting `link/file` where `link` is a host symlink used to copy an
+  // external file into /input (host-file disclosure).
+  const hostPath = await secureResolve(userId, workspaceId, relPath);
   const lstats = await lstat(hostPath).catch(() => null);
   if (!lstats) throw new NotFoundError("Workspace item", relPath);
   if (lstats.isSymbolicLink()) {
@@ -95,8 +98,11 @@ export async function duBytes(hostPath: string, maxEntries = 100_000): Promise<n
   let entries = 0;
   const walk = async (p: string): Promise<void> => {
     if (entries++ > maxEntries) throw new BadRequestError("输入项文件数过多（>100000）");
-    const s = await stat(p).catch(() => null);
+    const s = await lstat(p).catch(() => null);
     if (!s) return;
+    if (s.isSymbolicLink()) {
+      throw new BadRequestError("输入项包含符号链接（已拒绝）");
+    }
     if (!s.isDirectory()) {
       total += s.size;
       return;
@@ -168,9 +174,7 @@ export async function assertDirHasNoSymlinks(dir: string, maxEntries = 100_000):
   await walk(dir);
 }
 
-export const MOUNT_LIMITS = {
-  /** Max input items per container. */
-  maxInputs: 32,
-  /** Max total materialized input bytes per container. */
-  maxInputBytes: 1024 * 1024 * 1024,
-} as const;
+/** Per-container mount caps (env: CONTAINER_MAX_INPUT_MOUNTS / CONTAINER_MAX_INPUT_BYTES). */
+export function mountLimits(): { maxInputs: number; maxInputBytes: number } {
+  return loadConfig().mounts;
+}

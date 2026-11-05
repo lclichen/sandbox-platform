@@ -13,11 +13,12 @@
  */
 import type { Database, SqlValue } from "../db/driver.ts";
 import { createQuotaService } from "./quota.service.ts";
-import { NotFoundError, ConflictError, BadRequestError } from "../utils/errors.ts";
+import { NotFoundError, ConflictError, BadRequestError, HttpError } from "../utils/errors.ts";
 import { logger } from "../utils/logger.ts";
 import { loadConfig } from "../config.ts";
 import { effectiveWorkspaceUploadMaxBytes } from "./runtime-settings.ts";
 import { nanoid } from "nanoid";
+import type { Readable } from "node:stream";
 import * as storage from "./workspace-storage.ts";
 import type { WorkspaceFileEntry } from "./workspace-storage.ts";
 
@@ -256,26 +257,66 @@ export function createWorkspaceService(db: Database) {
       if (!filename || filename.includes("/") || filename.includes("\\") || filename.includes("\0")) {
         throw new BadRequestError("Invalid filename");
       }
+      // The raw-upload route enforces this too, but service callers (e.g.
+      // export-workspace) must not bypass the per-file cap.
+      const maxBytes = effectiveWorkspaceUploadMaxBytes();
+      if (content.byteLength > maxBytes) {
+        throw new HttpError(413, "UPLOAD_TOO_LARGE", `file exceeds the ${maxBytes}-byte limit`);
+      }
       // Avoid path-component tricks: build the target as dirRel/filename and
       // let resolveInWorkspace's containment check do the final enforcement.
       const rel = dirRel ? `${dirRel.replace(/\/+$/, "")}/${filename}` : filename;
-      // P2-5: the upload must stay within the user's aggregate disk ceiling.
-      await quotas.assertAggregateDisk(userId, content.byteLength);
+      // P2-5: the upload must stay within the OWNER's aggregate disk ceiling
+      // (an admin may be writing into someone else's workspace).
+      await quotas.assertAggregateDisk(ws.user_id, content.byteLength);
       await storage.writeFile(ws.user_id, id, rel, content);
       await refreshStats(id, ws.user_id);
       return { path: rel, size: content.byteLength };
     },
 
-    async downloadFile(
+    /**
+     * Streamed variant of uploadFile: the request body is written to a staging
+     * file (max 2 GiB by default) and renamed into place after the quota check.
+     * Used by the octet-stream route so a large file never sits in the heap.
+     */
+    async uploadFileStream(
+      id: number,
+      userId: number,
+      dirRel: string,
+      filename: string,
+      stream: Readable,
+      contentLength?: number,
+      isAdmin = false,
+    ): Promise<{ path: string; size: number }> {
+      const ws = await this.requireOwned(id, userId, isAdmin);
+      if (!filename || filename.includes("/") || filename.includes("\\") || filename.includes("\0")) {
+        throw new BadRequestError("Invalid filename");
+      }
+      const maxBytes = effectiveWorkspaceUploadMaxBytes();
+      if (contentLength !== undefined && Number.isFinite(contentLength) && contentLength > maxBytes) {
+        throw new HttpError(413, "UPLOAD_TOO_LARGE", `file exceeds the ${maxBytes}-byte limit`);
+      }
+      const rel = dirRel ? `${dirRel.replace(/\/+$/, "")}/${filename}` : filename;
+      const result = await storage.writeFileFromStream(ws.user_id, id, rel, stream, maxBytes, async (size) => {
+        await quotas.assertAggregateDisk(ws.user_id, size);
+      });
+      await refreshStats(id, ws.user_id);
+      return { path: rel, size: result.size };
+    },
+
+    async downloadFileInfo(
       id: number,
       userId: number,
       rel: string,
       isAdmin = false,
-    ): Promise<{ buffer: Buffer; filename: string }> {
+    ): Promise<{ absPath: string; size: number; filename: string }> {
       const ws = await this.requireOwned(id, userId, isAdmin);
-      const buffer = await storage.readFile(ws.user_id, id, rel);
-      const filename = rel.split("/").pop() ?? "download";
-      return { buffer, filename };
+      const { abs, size } = await storage.resolveDownloadFile(ws.user_id, id, rel);
+      const maxBytes = effectiveWorkspaceUploadMaxBytes();
+      if (size > maxBytes) {
+        throw new HttpError(413, "FILE_TOO_LARGE", `file exceeds the ${maxBytes}-byte download limit`);
+      }
+      return { absPath: abs, size, filename: rel.split("/").pop() ?? "download" };
     },
 
     async deleteFile(
@@ -320,11 +361,11 @@ export function createWorkspaceService(db: Database) {
     ): Promise<{ root: string; entries: storage.TreeEntry[]; truncated: boolean; nextCursor?: string }> {
       const ws = await this.requireOwned(id, userId, isAdmin);
       const cfg = loadConfig();
-      const depth = Math.min(Math.max(opts.depth ?? 8, 1), 32);
+      const depth = Math.min(Math.max(opts.depth ?? 8, 1), cfg.workspace.treeMaxDepth);
       const result = await storage.walkTree(ws.user_id, id, rel, {
         ignore: cfg.workspace.treeIgnore,
         maxDepth: depth,
-        maxEntries: 5000,
+        maxEntries: cfg.workspace.treeMaxEntries,
         ...(opts.cursor ? { afterPath: opts.cursor } : {}),
       });
       return { root: rel === "/" ? "" : rel.replace(/^\/+|\/+$/g, ""), ...result };
@@ -373,7 +414,11 @@ export function createWorkspaceService(db: Database) {
       });
       // Part cap 8 MiB keeps a single request body bounded; sessions may span
       // as many parts as needed up to the total cap enforced at completion.
-      return { uploadId, partBytesMax: 8 * 1024 * 1024, maxBytes: effectiveWorkspaceUploadMaxBytes() };
+      return {
+        uploadId,
+        partBytesMax: storage.uploadPartMaxBytes(),
+        maxBytes: effectiveWorkspaceUploadMaxBytes(),
+      };
     },
 
     /** Append one part to a session. The session must belong to this user. */
@@ -406,21 +451,24 @@ export function createWorkspaceService(db: Database) {
       if (!meta || meta.wsId !== id || meta.userId !== ws.user_id) {
         throw new NotFoundError("Upload session", uploadId);
       }
-      const cfg = loadConfig();
-      const parts = await storage.collectUploadParts(uploadId);
-      const total = parts.reduce((sum, p) => sum + p.byteLength, 0);
-      if (total > effectiveWorkspaceUploadMaxBytes()) {
-        await storage.removeUpload(uploadId).catch(() => {});
-        throw new BadRequestError(
-          `Upload exceeds the per-file limit of ${effectiveWorkspaceUploadMaxBytes()} bytes`,
-        );
-      }
+      const maxBytes = effectiveWorkspaceUploadMaxBytes();
       const rel = meta.dirRel ? `${meta.dirRel}/${meta.name}` : meta.name;
-      await quotas.assertAggregateDisk(ws.user_id, total);
-      await storage.writeFile(ws.user_id, id, rel, Buffer.concat(parts));
+      let result: { size: number };
+      try {
+        // Stream parts one at a time (8 MiB default) instead of Buffer.concat
+        // over the whole session; a 2 GiB upload must not allocate 2 GiB.
+        result = await storage.writeUploadPartsToFile(uploadId, ws.user_id, id, rel, maxBytes, async (size) => {
+          await quotas.assertAggregateDisk(ws.user_id, size);
+        });
+      } catch (err) {
+        if (err instanceof HttpError && err.status === 413) {
+          await storage.removeUpload(uploadId).catch(() => undefined);
+        }
+        throw err;
+      }
       await storage.removeUpload(uploadId).catch(() => {});
       await refreshStats(id, ws.user_id);
-      return { path: rel, size: total };
+      return { path: rel, size: result.size };
     },
 
     /** Abort a session and discard its parts. */

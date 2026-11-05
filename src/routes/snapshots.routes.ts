@@ -16,7 +16,7 @@ import { getDb, getExecutorFromReq } from "../app.ts";
 import { createContainerService } from "../services/container.service.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
 import { UnauthorizedError } from "../utils/errors.ts";
-import { idParamSchema } from "./schemas/common.ts";
+import { idParamSchema, restoreSnapshotSchema } from "./schemas/common.ts";
 import { validate } from "./validate.ts";
 
 function actor(req: ExpressRequest): { id: number; isAdmin: boolean } {
@@ -39,10 +39,9 @@ export function snapshotsRouter(): Router {
 
   router.post("/:sid/restore-container", (req, res, next) => {
     const { id: sid } = validate(idParamSchema, { id: req.params.sid });
+    const body = validate(restoreSnapshotSchema, req.body ?? {});
     const name =
-      typeof req.body?.name === "string" && req.body.name.trim()
-        ? req.body.name.trim()
-        : `restore-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "")}`;
+      body.name ?? `restore-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "")}`;
     const a = actor(req);
     const svc = createContainerService(getDb(req), getExecutorFromReq(req));
     svc

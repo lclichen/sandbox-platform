@@ -15,7 +15,7 @@ import { createQuotaService, type ResourceRequest } from "./quota.service.ts";
 import { createImageService, resolveImagePath } from "./image.service.ts";
 import { createWorkspaceService } from "./workspace.service.ts";
 import {
-  MOUNT_LIMITS,
+  mountLimits,
   assertDirHasNoSymlinks,
   duBytes,
   ensureInputDir,
@@ -28,6 +28,8 @@ import {
   resolveInputSource,
 } from "./container-mounts.ts";
 import { withContainerLock } from "./container-lock.ts";
+import { effectiveWorkspaceUploadMaxBytes } from "./runtime-settings.ts";
+import { loadConfig } from "../config.ts";
 import {
   NotFoundError,
   ForbiddenError,
@@ -75,7 +77,9 @@ export interface ContainerPublic extends Omit<ContainerRow, "instance_name" | "o
  * look like secrets (key/token/secret substrings) are masked so injected LLM
  * virtual keys are never echoed back through GET /containers.
  */
-const SECRET_ENV_RE = /(_KEY|_TOKEN|_SECRET|PASSWORD|CREDENTIAL)$/i;
+// Substring, not suffix: keys like OPENAI_APIKEY / DB_PASS / MY_AUTH would
+// otherwise be echoed in clear. A false positive (e.g. MONKEY) is harmless.
+const SECRET_ENV_RE = /(KEY|TOKEN|SECRET|PASS|PWD|CREDENTIAL|PRIVATE|AUTH)/i;
 function toPublic(row: ContainerRow, dialect: string, isAdmin = false): ContainerPublic {
   const { env: _env, error_message: _errorMessage, ...rest } = row;
   void _env;
@@ -182,14 +186,19 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       );
     },
 
-    async create(userId: number, input: CreateContainerInput): Promise<ContainerRow> {
+    async create(userId: number, input: CreateContainerInput, isAdmin = false): Promise<ContainerRow> {
       const image = await images.requireById(input.imageId);
-      // R6: the owner's quota may whitelist which images are provisionable.
-      await quotas.assertImageAllowed(userId, {
-        id: image.id,
-        is_public: Boolean(image.is_public),
-        name: image.name,
-      });
+      // R6: the owner's quota may whitelist which images are provisionable;
+      // private (is_public=false) images are admin-only.
+      await quotas.assertImageAllowed(
+        userId,
+        {
+          id: image.id,
+          is_public: Boolean(image.is_public),
+          name: image.name,
+        },
+        isAdmin,
+      );
       // Fallback disk is intentionally small (1 GB): overlays are
       // pre-allocated ext3 images, so diskGb is real disk usage per container —
       // on a small single-box deployment 5 GB/container plus same-size
@@ -412,7 +421,12 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       return withContainerLock(id, async () => {
       const row = await this.requireOwned(id, userId, isAdmin);
       if (row.status === "destroyed") throw new InvalidStateError("Cannot snapshot a destroyed container");
-      const quota = await quotas.forUser(userId);
+      // Quota/snapshot ownership follows the CONTAINER owner, not the actor:
+      // an admin snapshotting someone else's container must not consume the
+      // admin's disk quota or create an admin-owned save point for another
+      // user's data.
+      const ownerId = row.user_id;
+      const quota = await quotas.forUser(ownerId);
       const existingCount = await db.get<{ c: number }>(
         "SELECT COUNT(*) AS c FROM snapshots WHERE container_id = ?",
         id,
@@ -442,13 +456,13 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         const snap = await executor.snapshot(handle, name);
         copied = snap.overlayPath;
         // P2-5: the copy already happened on disk, but refuse to record it if
-        // it would push the user past their aggregate disk ceiling.
-        await quotas.assertAggregateDisk(userId, snap.sizeBytes);
+        // it would push the OWNER past their aggregate disk ceiling.
+        await quotas.assertAggregateDisk(ownerId, snap.sizeBytes);
         const result = await db.run(
           `INSERT INTO snapshots (container_id, user_id, image_id, name, description, overlay_path, size_bytes)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
           id,
-          userId,
+          ownerId,
           row.image_id,
           name,
           description ?? null,
@@ -553,7 +567,9 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
     ): Promise<ContainerRow> {
       const snap = await this.requireOwnedSnapshot(snapshotId, userId, isAdmin);
       if (!snap.image_id) throw new BadRequestError("Snapshot has no recorded image; cannot restore to a new container");
-      const row = await this.create(userId, { imageId: snap.image_id, name });
+      // Reuse create()'s image gate: a user may not resurrect a private image
+      // through a snapshot row they happen to own.
+      const row = await this.create(userId, { imageId: snap.image_id, name }, isAdmin);
       try {
         await this._restoreFromSnapshot(row, {
           id: snap.id,
@@ -716,9 +732,10 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       mounts: CreateContainerInput["mounts"],
     ): Promise<{ mountDirs: { inputDir: string; outputDir?: string }; rows: Array<{ kind: "input" | "output"; workspaceId: number; relPath: string; name: string }> } | undefined> {
       if (!mounts || (!mounts.inputs?.length && !mounts.output)) return undefined;
+      const caps = mountLimits();
       const inputs = mounts.inputs ?? [];
-      if (inputs.length > MOUNT_LIMITS.maxInputs) {
-        throw new BadRequestError(`输入挂载项过多（>${MOUNT_LIMITS.maxInputs}）`);
+      if (inputs.length > caps.maxInputs) {
+        throw new BadRequestError(`输入挂载项过多（>${caps.maxInputs}）`);
       }
 
       const stagingDir = await ensureInputDir(instanceName);
@@ -728,8 +745,8 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         const ws = await workspaces.requireOwned(item.workspaceId, userId);
         const src = await resolveInputSource(ws.user_id, ws.id, item.path);
         totalBytes += src.sizeBytes;
-        if (totalBytes > MOUNT_LIMITS.maxInputBytes) {
-          throw new BadRequestError(`输入挂载总量超过 1GB 上限`);
+        if (totalBytes > caps.maxInputBytes) {
+          throw new BadRequestError(`输入挂载总量超过 ${caps.maxInputBytes} 字节上限`);
         }
         const name = await materializeInput(src.hostPath, stagingDir, src.name);
         rows.push({ kind: "input", workspaceId: ws.id, relPath: item.path.replace(/^\/+/, ""), name });
@@ -790,18 +807,19 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
       if (row.status === "destroyed") throw new InvalidStateError("Cannot mount inputs on a destroyed container");
       if (!row.instance_name) throw new InvalidStateError("Container has no instance name");
 
+      const caps = mountLimits();
       const existing = await this.getMounts(containerId);
       const inputRows = existing.filter((m) => m.kind === "input");
-      if (inputRows.length >= MOUNT_LIMITS.maxInputs) {
-        throw new BadRequestError(`输入挂载项过多（>${MOUNT_LIMITS.maxInputs}）：请先移除部分挂载`);
+      if (inputRows.length >= caps.maxInputs) {
+        throw new BadRequestError(`输入挂载项过多（>${caps.maxInputs}）：请先移除部分挂载`);
       }
 
       const ws = await workspaces.requireOwned(item.workspaceId, userId, isAdmin);
       const src = await resolveInputSource(ws.user_id, ws.id, item.path);
       const stagingDir = await ensureInputDir(row.instance_name);
       const usedBytes = await duBytes(stagingDir);
-      if (usedBytes + src.sizeBytes > MOUNT_LIMITS.maxInputBytes) {
-        throw new BadRequestError(`输入挂载总量将超过 1GB 上限`);
+      if (usedBytes + src.sizeBytes > caps.maxInputBytes) {
+        throw new BadRequestError(`输入挂载总量将超过 ${caps.maxInputBytes} 字节上限`);
       }
       const name = await materializeInput(src.hostPath, stagingDir, src.name);
       const result = await db.run(
@@ -874,7 +892,11 @@ export function createContainerService(db: Database, executor: SandboxExecutor, 
         throw new Error("This executor cannot export binaries (local apptainer only)");
       }
       const handle = handleFromRow(row);
-      const buf = await executor.execBuffer(handle, "tar czf - -C /workspace .");
+      // The archive is buffered before it is written into a workspace, so cap
+      // it independently of the (much larger) per-file upload policy.
+      const buf = await executor.execBuffer(handle, "tar czf - -C /workspace .", {
+        maxBytes: Math.min(effectiveWorkspaceUploadMaxBytes(), loadConfig().workspace.exportMaxBytes),
+      });
       if (buf.byteLength === 0) throw new Error("Export produced an empty archive");
       const fileName = `${row.name.replace(/[^a-zA-Z0-9_.-]+/g, "_")}-${new Date().toISOString().slice(0, 10)}.tar.gz`;
       await workspaceService.uploadFile(workspaceId, userId, "", fileName, buf, isAdmin);

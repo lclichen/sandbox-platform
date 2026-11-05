@@ -82,7 +82,10 @@ function mockIdp(extra: { nonce?: string; sub?: string; iss?: string; aud?: stri
     }),
   );
   // token 端点也 mock：POST /token 返回刚才签发的 id_token（code 任意接受）。
-  const baseMock = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>);
+  const baseMock = globalThis.fetch as unknown as (
+    url: string | URL,
+    init?: RequestInit,
+  ) => Promise<Response>;
   const wrappedFetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
     if (String(url) === "https://idp.test/token") {
       return new Response(JSON.stringify({ access_token: "at", token_type: "Bearer", id_token: idToken }), { status: 200 });

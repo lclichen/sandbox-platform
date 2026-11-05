@@ -91,12 +91,16 @@ export function createAuthService(db: Database) {
         await verifyPasswordConstantTime(password, null);
         throw new UnauthorizedError("Invalid username or password");
       }
+      // Verify the password BEFORE disclosing account state. Returning
+      // ACCOUNT_PENDING/ACCOUNT_DISABLED for any password turned login into a
+      // username-enumeration oracle (the constant-time hash comparison above
+      // only protects the not-found branch).
+      const ok = await verifyPasswordConstantTime(password, user.password_hash);
+      if (!ok) throw new UnauthorizedError("Invalid username or password");
       if (user.status === "pending") throw new AccountPendingError();
       if (user.status === "disabled") {
         throw new HttpError(403, "ACCOUNT_DISABLED", "Account is disabled");
       }
-      const ok = await verifyPasswordConstantTime(password, user.password_hash);
-      if (!ok) throw new UnauthorizedError("Invalid username or password");
       await users.touchLogin(user.id);
       const pair = await issueTokenPair(user, clientIp);
       return { ...pair, user };
@@ -144,8 +148,22 @@ export function createAuthService(db: Database) {
         throw new HttpError(403, "ACCOUNT_DISABLED", "Account is disabled");
       }
 
-      // Rotate: revoke old, issue new within the same family.
-      await db.run("UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?", stored.id);
+      // Rotate atomically: only ONE concurrent request may win the conditional
+      // revoke. Without the `revoked_at IS NULL` predicate, two parallel
+      // refreshes of the same token each passed the earlier check and minted a
+      // token pair (refresh-token duplication). A loser is treated as replay
+      // and revokes the whole family.
+      const rotated = await db.run(
+        "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND revoked_at IS NULL",
+        stored.id,
+      );
+      if (rotated.changes !== 1) {
+        await db.run(
+          "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE family_id = ? AND revoked_at IS NULL",
+          stored.family_id,
+        );
+        throw new UnauthorizedError("Refresh token already used");
+      }
       return issueTokenPair(user, clientIp, stored.family_id);
     },
 

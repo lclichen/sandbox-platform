@@ -17,7 +17,7 @@
  */
 import { Router, type Response } from "express";
 import { getDb, getExecutorFromReq } from "../app.ts";
-import { createToolsService } from "../services/tools.service.ts";
+import { createToolsService, toolLimits, assertBashTimeout } from "../services/tools.service.ts";
 import { createContainerService } from "../services/container.service.ts";
 import { toHttpError } from "../utils/errors.ts";
 import { requireAuth, currentUserId, type AuthedRequest } from "../auth/middleware.ts";
@@ -114,6 +114,7 @@ export function toolsRouter(): Router {
     const { id } = validate(idParamSchema, req.params);
     const body = validate(bashToolSchema, req.body);
     const { command, cwd, timeout } = body;
+    assertBashTimeout(timeout);
 
     res.setHeader("Content-Type", "text/event-stream");
     // nginx buffers SSE by default; batches events into visible delays.
@@ -158,12 +159,17 @@ export function toolsRouter(): Router {
         const result = await executor.exec(handle, command, {
           cwd,
           timeout,
+          maxOutputBytes: toolLimits().bashOutputMaxBytes,
           onData: (chunk: Buffer) => {
             writeEvent(`event: data\ndata: ${JSON.stringify({ chunk: chunk.toString("base64") })}\n\n`);
           },
         });
         writeEvent(
-          `event: end\ndata: ${JSON.stringify({ exitCode: result.exitCode, timedOut: result.timedOut })}\n\n`,
+          `event: end\ndata: ${JSON.stringify({
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            truncated: result.outputTruncated === true,
+          })}\n\n`,
         );
       } catch (err) {
         // SSE headers are already flushed, so the HTTP status stays 200; carry

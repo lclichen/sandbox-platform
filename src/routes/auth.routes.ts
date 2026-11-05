@@ -30,6 +30,38 @@ import { BadRequestError } from "../utils/errors.ts";
 import { loginSchema, refreshSchema, registerSchema, changePasswordSchema, idParamSchema } from "./schemas/common.ts";
 import { validate } from "./validate.ts";
 
+/**
+ * OIDC return-URL allowlist check. Prefixes are compared by URL ORIGIN plus a
+ * path-boundary-aware prefix — never by raw string `startsWith`, which would
+ * accept `https://pi.example.com.evil.com` for an allowlist entry of
+ * `https://pi.example.com` and hand the one-time login code to an attacker.
+ * An empty list keeps the historical "any http(s) URL" behavior.
+ */
+export function isAllowedOidcRedirect(redirectUri: string, prefixes: string[]): boolean {
+  let target: URL;
+  try {
+    target = new URL(redirectUri);
+  } catch {
+    return false;
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:") return false;
+  if (target.username || target.password) return false;
+  if (prefixes.length === 0) return true;
+  return prefixes.some((rawPrefix) => {
+    let prefix: URL;
+    try {
+      prefix = new URL(rawPrefix);
+    } catch {
+      return false;
+    }
+    if (target.origin !== prefix.origin) return false;
+    const basePath = prefix.pathname.replace(/\/+$/, "");
+    // Origin-only prefix (path "" or "/") allows every path on that origin.
+    if (basePath === "") return true;
+    return target.pathname === basePath || target.pathname.startsWith(`${basePath}/`);
+  });
+}
+
 export function authRouter(): Router {
   const router = Router();
 
@@ -59,6 +91,7 @@ export function authRouter(): Router {
   const readFlowCookie = (req: { headers: { cookie?: string } }): string | undefined =>
     (req.headers.cookie ?? "").split("; ").find((part) => part.startsWith(oidcFlowCookieName + "="))?.slice(oidcFlowCookieName.length + 1);
   const oidcHandoffs = new Map<string, { accessToken: string; refreshToken: string; user: ReturnType<typeof oidcPublicUser> }>();
+  const OIDC_HANDOFF_MAX = 500;
 
   router.get("/oidc/begin", (req, res, next) => {
     if (!oidcEnabled()) {
@@ -68,14 +101,8 @@ export function authRouter(): Router {
     (async () => {
       const cfg = loadConfig();
       const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
-      if (!/^https?:\/\//.test(redirectUri)) {
-        res.status(400).json({ code: "BAD_REQUEST", message: "redirect_uri (http/https) is required" });
-        return;
-      }
-      // 回跳白名单：配置了前缀列表则强制匹配（防开放重定向）。
-      if (cfg.oidc.allowedRedirectPrefixes.length > 0
-        && !cfg.oidc.allowedRedirectPrefixes.some((prefix) => redirectUri.startsWith(prefix))) {
-        res.status(400).json({ code: "BAD_REQUEST", message: "redirect_uri is not allowed" });
+      if (!isAllowedOidcRedirect(redirectUri, cfg.oidc.allowedRedirectPrefixes)) {
+        res.status(400).json({ code: "BAD_REQUEST", message: "redirect_uri is missing or not allowed" });
         return;
       }
       const endpoints = await discoverEndpoints();
@@ -94,6 +121,7 @@ export function authRouter(): Router {
       res.cookie(oidcFlowCookieName, state, {
         httpOnly: true,
         sameSite: "lax",
+        secure: req.secure,
         maxAge: 10 * 60_000,
         path: "/api/v1/auth/oidc",
       });
@@ -136,6 +164,13 @@ export function authRouter(): Router {
       const auth = createAuthService(db);
       const pair = await auth.loginDirect(user, req.ip);
       const handoff = randomBytes(24).toString("base64url");
+      // Bound the map even while every entry is still within its 60s TTL: a
+      // valid IdP account could otherwise open logins in a tight loop and grow
+      // process memory without limit.
+      if (oidcHandoffs.size >= OIDC_HANDOFF_MAX) {
+        const oldest = oidcHandoffs.keys().next().value;
+        if (oldest) oidcHandoffs.delete(oldest);
+      }
       oidcHandoffs.set(handoff, {
         accessToken: pair.accessToken,
         refreshToken: pair.refreshToken,

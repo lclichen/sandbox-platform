@@ -26,7 +26,7 @@ import { logger } from "./utils/logger.ts";
 import { loadConfig } from "./config.ts";
 import { createDatabase, type Database } from "./db/driver.ts";
 import { getExecutor, type SandboxExecutorRef } from "./executors/index.ts";
-import { loginLimiter, refreshLimiter, bashLimiter, llmRevealLimiter, registerLimiter } from "./middleware/rate-limit.ts";
+import { loginLimiter, refreshLimiter, bashLimiter, llmRevealLimiter, registerLimiter, oidcLimiter } from "./middleware/rate-limit.ts";
 import { metricsMiddleware, metricsHandler, registry, recordLitellmHealth } from "./middleware/metrics.ts";
 import { authRouter } from "./routes/auth.routes.ts";
 import { usersRouter } from "./routes/users.routes.ts";
@@ -72,6 +72,7 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
   if (llmReady) {
     llmGatewayClient = createLlmGatewayClient({
       adminUrl: cfg.llm.gateway.adminUrl,
+      adminToken: cfg.llm.gateway.adminToken,
       publicBaseUrl: cfg.llm.gateway.publicBaseUrl,
       timeoutMs: cfg.llm.gateway.timeoutMs,
     });
@@ -101,7 +102,6 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     : undefined;
 
   const app = express();
-  app.use(express.json({ limit: "16mb" }));
   app.disable("x-powered-by");
 
   // Security headers (P1-1). CSP tuned for the SPA: same-origin scripts, inline
@@ -204,21 +204,30 @@ export async function createApp(deps?: AppDeps): Promise<{ app: Express; db: Dat
     }
   });
 
+  // Rate limiting (P1-1): brute-force / abuse surfaces, IP dimension.
+  // No-op middleware when disabled (default outside production).
+  //
+  // ORDER MATTERS: these run BEFORE express.json(). A JSON body parser on the
+  // whole app parsed up to 16 MiB before the login limiter ever saw the
+  // request, so an unauthenticated client could pin CPU/memory with oversized
+  // bodies. Rate-limit first, then parse.
+  app.use("/api/v1/auth/login", loginLimiter());
+  app.use("/api/v1/auth/refresh", refreshLimiter());
+  app.use("/api/v1/auth/register", registerLimiter());
+  app.use("/api/v1/auth/oidc", oidcLimiter());
+  app.use("/api/v1/containers/:id/tools/bash", bashLimiter());
+  // The reveal endpoint returns decrypted plaintext; cap it tightly.
+  app.use("/api/v1/llm/me/keys/:id/reveal", llmRevealLimiter());
+
+  // Body parsing for API routes (auth limiters above run without a body).
+  app.use(express.json({ limit: cfg.http.jsonBodyLimit }));
+
   // Request instrumentation (before routers so it wraps everything).
   app.use(metricsMiddleware());
 
   // Audit mutating requests. Mounted under /api/v1 so req.path is relative,
   // BEFORE the routers so res.on('finish') captures their outcome.
   app.use("/api/v1", auditMiddleware());
-
-  // Rate limiting (P1-1): brute-force / abuse surfaces, IP dimension.
-  // No-op middleware when disabled (default outside production).
-  app.use("/api/v1/auth/login", loginLimiter());
-  app.use("/api/v1/auth/refresh", refreshLimiter());
-  app.use("/api/v1/auth/register", registerLimiter());
-  app.use("/api/v1/containers/:id/tools/bash", bashLimiter());
-  // The reveal endpoint returns decrypted plaintext; cap it tightly.
-  app.use("/api/v1/llm/me/keys/:id/reveal", llmRevealLimiter());
 
   // API routers. Each receives the db + executor via req.app.locals.
   app.use("/api/v1/auth", authRouter());

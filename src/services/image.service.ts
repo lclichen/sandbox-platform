@@ -7,8 +7,8 @@
  */
 import type { Database, SqlValue } from "../db/driver.ts";
 import { decodeJson, encodeJson } from "../db/driver.ts";
-import { ConflictError, NotFoundError } from "../utils/errors.ts";
-import { isAbsolute, resolve } from "node:path";
+import { BadRequestError, ConflictError, NotFoundError } from "../utils/errors.ts";
+import { isAbsolute, resolve, sep } from "node:path";
 import { loadConfig } from "../config.ts";
 
 /**
@@ -20,7 +20,15 @@ import { loadConfig } from "../config.ts";
  */
 export function resolveImagePath(sifPath: string): string {
   if (isAbsolute(sifPath)) return sifPath;
-  return resolve(loadConfig().executor.apptainer.imageBaseDir, sifPath);
+  const base = resolve(loadConfig().executor.apptainer.imageBaseDir);
+  const abs = resolve(base, sifPath);
+  // Relative sif_path values are resolved against IMAGE_BASE_DIR; reject `../`
+  // escapes even though only admins can write image rows (defense in depth:
+  // a mistaken/compromised admin row must not point outside the image tree).
+  if (abs !== base && !abs.startsWith(base.endsWith(sep) ? base : base + sep)) {
+    throw new BadRequestError("Image path escapes IMAGE_BASE_DIR");
+  }
+  return abs;
 }
 
 export interface ImageRow {

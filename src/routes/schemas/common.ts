@@ -154,6 +154,17 @@ export const createSnapshotSchema = z.object({
   description: z.string().max(2048).optional(),
 });
 
+/** Restore an owned snapshot into a new container (name is optional). */
+export const restoreSnapshotSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(/^[a-zA-Z0-9_.\s-]+$/, "Letters, digits, _ . space - only")
+    .optional(),
+});
+
 // ----- tools (container operations relayed from pi extension) -----
 export const readToolSchema = z.object({
   path: z.string().min(1).max(4096),
@@ -173,7 +184,9 @@ export const editToolSchema = z.object({
 export const bashToolSchema = z.object({
   command: z.string().min(1),
   cwd: z.string().max(4096).optional(),
-  timeout: z.number().int().min(1).max(3600).optional(),
+  // Hard schema ceiling; the effective cap is TOOLS_BASH_MAX_TIMEOUT_SECONDS
+  // (default 3600) enforced by assertBashTimeout.
+  timeout: z.number().int().min(1).max(86_400).optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 

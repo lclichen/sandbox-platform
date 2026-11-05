@@ -37,19 +37,16 @@ import {
   initUploadSchema,
 } from "./schemas/common.ts";
 import { validate } from "./validate.ts";
-import { effectiveWorkspaceUploadMaxBytes } from "../services/runtime-settings.ts";
+import { uploadPartMaxBytes } from "../services/workspace-storage.ts";
 
-/**
- * Raw-body parser for single-file uploads. The global express.json() middleware
- * only parses application/json, so octet-stream requests arrive with an empty
- * body; this handler populates req.body with the raw Buffer. Capped at the
- * configured per-file limit (WORKSPACE_UPLOAD_MAX_BYTES, default 200 MiB).
- */
-const rawUpload = Router().post(
-  "/:id/files",
+/** Raw-body parser for chunked-upload parts (bounded per request body). */
+const rawPart = Router().put(
+  "/:id/uploads/:uid",
   (req, res, next) => {
-    // Collect the raw body manually; works regardless of Content-Type.
-    const max = effectiveWorkspaceUploadMaxBytes();
+    // A single part is capped at 8 MiB (the client is told partBytesMax by
+    // POST /uploads). The session total is enforced in workspace-storage on
+    // every part write, not only at completion.
+    const max = uploadPartMaxBytes();
     const chunks: Buffer[] = [];
     let received = 0;
     let rejected = false;
@@ -58,11 +55,9 @@ const rawUpload = Router().post(
       chunks.push(chunk);
       received += chunk.byteLength;
       if (received > max) {
-        // Respond FIRST, then drop the connection: destroying before writing
-        // left the client with ECONNRESET instead of a 413.
         rejected = true;
         chunks.length = 0;
-        res.status(413).json({ code: "UPLOAD_TOO_LARGE", message: `upload exceeds ${max} bytes` });
+        res.status(413).json({ code: "UPLOAD_TOO_LARGE", message: `part exceeds ${max} bytes` });
         req.destroy();
       }
     });
@@ -73,32 +68,6 @@ const rawUpload = Router().post(
     });
     req.on("error", (err) => {
       if (rejected) return;
-      next(err);
-    });
-  },
-);
-
-/** Raw-body parser for chunked-upload parts (bounded per request body). */
-const rawPart = Router().put(
-  "/:id/uploads/:uid",
-  (req, _res, next) => {
-    // A part can reasonably be as large as the whole per-file cap; the total
-    // across parts is enforced again at completion.
-    const max = effectiveWorkspaceUploadMaxBytes();
-    const chunks: Buffer[] = [];
-    let received = 0;
-    req.on("data", (chunk: Buffer) => {
-      chunks.push(chunk);
-      received += chunk.byteLength;
-      if (received > max) {
-        req.destroy(new Error("part too large"));
-      }
-    });
-    req.on("end", () => {
-      req.body = Buffer.concat(chunks);
-      next();
-    });
-    req.on("error", (err) => {
       next(err);
     });
   },
@@ -188,9 +157,11 @@ export function workspacesRouter(): Router {
       .catch(next);
   });
 
-  // Raw-body upload: the rawUpload middleware collects the octet-stream body
-  // before this handler runs. Mount it on the same path so it intercepts.
-  router.post("/:id/files", rawUpload, (req, res, next) => {
+  // Single-file upload. The body is streamed to disk (never buffered): a
+  // 2 GiB upload must not allocate 2 GiB in the platform heap. The service
+  // enforces the per-file cap while streaming and runs the aggregate-disk
+  // quota check before the staging file is renamed into place.
+  router.post("/:id/files", (req, res, next) => {
     const { id } = validate(idParamSchema, req.params);
     const dirRel = normalizePath(req.query.path);
     const name = typeof req.query.name === "string" ? req.query.name : "";
@@ -198,11 +169,29 @@ export function workspacesRouter(): Router {
       res.status(400).json({ code: "BAD_REQUEST", message: "Missing 'name' query parameter" });
       return;
     }
-    const content = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? "");
+    if (req.is("application/json")) {
+      // express.json() already consumed the body; streaming it now would
+      // silently write an empty file.
+      res.status(400).json({
+        code: "BAD_REQUEST",
+        message: "Workspace uploads must use a raw body (application/octet-stream), not JSON",
+      });
+      return;
+    }
+    const rawLength = req.headers["content-length"];
+    const contentLength = typeof rawLength === "string" ? Number.parseInt(rawLength, 10) : undefined;
     const a = actor(req);
     const svc = createWorkspaceService(getDb(req));
     svc
-      .uploadFile(id, a.id, dirRel === "/" ? "" : dirRel, name, content, a.isAdmin)
+      .uploadFileStream(
+        id,
+        a.id,
+        dirRel === "/" ? "" : dirRel,
+        name,
+        req,
+        Number.isFinite(contentLength) ? contentLength : undefined,
+        a.isAdmin,
+      )
       .then((result) => res.status(201).json(result))
       .catch(next);
   });
@@ -213,12 +202,21 @@ export function workspacesRouter(): Router {
     const a = actor(req);
     const svc = createWorkspaceService(getDb(req));
     svc
-      .downloadFile(id, a.id, validated.path, a.isAdmin)
-      .then(({ buffer, filename }) => {
+      .downloadFileInfo(id, a.id, validated.path, a.isAdmin)
+      .then(({ absPath, size, filename }) => {
         res.setHeader("Content-Type", "application/octet-stream");
         res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
-        res.setHeader("Content-Length", String(buffer.byteLength));
-        res.send(buffer);
+        res.setHeader("Content-Length", String(size));
+        // sendFile streams from disk (and supports Range) instead of loading
+        // the whole file into the request handler.
+        res.sendFile(absPath, (err) => {
+          if (!err) return;
+          if (res.headersSent) {
+            res.destroy(err);
+            return;
+          }
+          next(err);
+        });
       })
       .catch(next);
   });

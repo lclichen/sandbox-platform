@@ -13,6 +13,7 @@
  * each DDL statement, branching on dialect where the two differ.
  */
 import { mkdir } from "node:fs/promises";
+import { chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
 // Type-only import: erased at runtime, so the test runner never sees a
@@ -73,6 +74,14 @@ class SqliteDatabase implements Database {
 
   constructor(filename: string) {
     this.db = new DatabaseSync(filename);
+    // The sqlite file holds password hashes, refresh-token hashes and encrypted
+    // LLM keys. Tighten the mode on creation (no-op on Windows); a pre-existing
+    // world-readable file is narrowed here too.
+    try {
+      chmodSync(filename, 0o600);
+    } catch {
+      /* best-effort: filesystems without POSIX modes */
+    }
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
   }

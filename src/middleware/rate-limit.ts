@@ -62,7 +62,7 @@ export function llmRevealLimiter(): RequestHandler {
  */
 export function changePasswordLimiter(): RequestHandler {
   const c = loadConfig();
-  return c.rateLimit.enabled ? limiter(60_000, 5) : noop();
+  return c.rateLimit.enabled ? limiter(60_000, c.rateLimit.changePasswordPerMinute) : noop();
 }
 
 /**
@@ -73,4 +73,14 @@ export function changePasswordLimiter(): RequestHandler {
 export function registerLimiter(): RequestHandler {
   const c = loadConfig();
   return c.rateLimit.enabled ? limiter(60_000, c.rateLimit.registerPerMinute) : noop();
+}
+
+/**
+ * OIDC begin/callback/exchange are public and each hit triggers outbound
+ * discovery/JWKS/token calls. Cap them so the platform cannot be used as an
+ * unauthenticated IdP request amplifier.
+ */
+export function oidcLimiter(): RequestHandler {
+  const c = loadConfig();
+  return c.rateLimit.enabled ? limiter(60_000, c.rateLimit.oidcPerMinute) : noop();
 }

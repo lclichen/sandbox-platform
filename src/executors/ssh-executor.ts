@@ -316,7 +316,6 @@ export class SshExecutor implements SandboxExecutor {
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {
     await this.connect(handle.node);
     const cwdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
-    const wrapped = `apptainer exec instance://${shellQuote(handle.id)} sh -c ${shellQuote(cwdPrefix + command)}`;
     // node-ssh's execOptions.timeout kills the process but doesn't surface a
     // distinct "timed out" signal (result.code is typically null afterward).
     // Track the deadline ourselves so callers get an accurate timedOut flag,
@@ -329,10 +328,56 @@ export class SshExecutor implements SandboxExecutor {
     };
     const timer = deadline ? setTimeout(onTimeout, timeoutMs!) : undefined;
     if (timer) timer.unref?.();
+
+    // Bound buffered output at the SSH channel. execCommand() unconditionally
+    // accumulates the full stdout/stderr in memory, so a `yes` command could
+    // OOM the platform before tools.service truncates the result.
+    let channel: ClientChannel | undefined;
+    let outputBytes = 0;
+    let outputTruncated = false;
+    const maxOutput = opts.maxOutputBytes && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : undefined;
+    const collect = (d: Buffer): void => {
+      if (maxOutput === undefined) {
+        outputBytes += d.byteLength;
+        opts.onData?.(d);
+        return;
+      }
+      const remaining = maxOutput - outputBytes;
+      if (remaining <= 0) {
+        if (!outputTruncated) {
+          outputTruncated = true;
+          try {
+            channel?.close();
+          } catch {
+            /* channel already gone */
+          }
+        }
+        return;
+      }
+      const accepted = d.byteLength > remaining ? d.subarray(0, remaining) : d;
+      outputBytes += accepted.byteLength;
+      opts.onData?.(accepted);
+      if (accepted.byteLength < d.byteLength && !outputTruncated) {
+        outputTruncated = true;
+        try {
+          channel?.close();
+        } catch {
+          /* channel already gone */
+        }
+      }
+    };
     try {
-      const result = await this.ssh.execCommand(wrapped, {
-        execOptions: opts.timeout ? { timeout: opts.timeout * 1000 } as never : undefined,
-      });
+      const result = await this.ssh.execCommand(
+        `apptainer exec instance://${shellQuote(handle.id)} sh -c ${shellQuote(cwdPrefix + command)}`,
+        {
+          execOptions: opts.timeout ? { timeout: opts.timeout * 1000 } as never : undefined,
+          onChannel: (ch) => {
+            channel = ch;
+          },
+          onStdout: collect,
+          onStderr: collect,
+        },
+      );
       // If our own deadline fired (or has passed by the time execCommand
       // returned), treat it as a timeout regardless of node-ssh's signal.
       if (deadline && (timedOut || Date.now() >= deadline)) timedOut = true;
@@ -341,7 +386,16 @@ export class SshExecutor implements SandboxExecutor {
         stdout: result.stdout ?? "",
         stderr: result.stderr ?? "",
         timedOut,
+        outputTruncated,
       };
+    } catch (err) {
+      // Closing the channel on the output cap may make node-ssh reject while
+      // the remote command is still draining. Report the partial/truncated
+      // result instead of turning the cap into a 500.
+      if (outputTruncated) {
+        return { exitCode: -1, stdout: "", stderr: "", timedOut, outputTruncated: true };
+      }
+      throw err;
     } finally {
       if (timer) clearTimeout(timer);
     }

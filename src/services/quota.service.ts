@@ -169,10 +169,21 @@ export function createQuotaService(db: Database) {
      * the whitelist is null/empty; otherwise the image id must be listed.
      * Non-public images are never allowed via this path (admin-only concern).
      */
-    async assertImageAllowed(userId: number, image: { id: number; is_public: boolean; name?: string }): Promise<void> {
+    async assertImageAllowed(
+      userId: number,
+      image: { id: number; is_public: boolean; name?: string },
+      isAdmin = false,
+    ): Promise<void> {
       const quota = await this.forUser(userId);
       if (!image.is_public) {
-        // Non-public images are reserved for admins (checked by the caller).
+        // Non-public images are admin-only. This used to `return` here on the
+        // assumption that "the caller checks" — no caller did, so any user
+        // could launch a container from a private image by guessing its id.
+        if (!isAdmin) {
+          throw new ImageNotAllowedError(`Image ${image.name ?? image.id} is not public`, {
+            imageId: image.id,
+          });
+        }
         return;
       }
       const whitelist = quota.allowed_image_ids;
@@ -241,7 +252,7 @@ export function createQuotaService(db: Database) {
       const row = await db.get<{ total: number | string }>(
         `SELECT
            COALESCE((SELECT SUM(o.size_bytes) FROM overlays o JOIN containers c ON o.container_id = c.id WHERE c.user_id = ? AND c.status != 'destroyed'), 0)
-           + COALESCE((SELECT SUM(s.size_bytes) FROM snapshots s JOIN containers c ON s.container_id = c.id WHERE c.user_id = ? AND c.status != 'destroyed'), 0)
+           + COALESCE((SELECT SUM(s.size_bytes) FROM snapshots s WHERE s.user_id = ?), 0)
            + COALESCE((SELECT SUM(w.size_bytes) FROM workspaces w WHERE w.user_id = ?), 0) AS total`,
         userId,
         userId,

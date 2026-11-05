@@ -33,6 +33,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Database } from "../db/driver.ts";
 import type { SandboxExecutor } from "../executors/types.ts";
 import { createContainerService } from "../services/container.service.ts";
+import { createUserService } from "../services/user.service.ts";
 import { consumePtyTicket } from "../services/pty-tickets.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
@@ -71,9 +72,10 @@ interface ClientFrame {
  */
 export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { close(): void } {
   const { db, executor } = deps;
+  const bootCfg = loadConfig();
   // maxPayload: input frames are tiny keystrokes/pastes; anything bigger is
   // abuse (default ws cap is 100 MiB per frame → straight to JSON.parse).
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: bootCfg.pty.maxFrameBytes });
   const openPerContainer = new Map<number, number>();
 
   const increment = (containerId: number): number => {
@@ -121,10 +123,18 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { clos
 
       const cfg = loadConfig();
       const svc = createContainerService(db, executor);
+      // Re-read the user instead of trusting the 60s ticket's role snapshot:
+      // a demoted/disabled admin must not keep cross-container PTY access for
+      // the rest of the ticket TTL.
+      const user = await createUserService(db).getById(claims.userId);
+      if (!user || user.status !== "active") {
+        rejectHttp(socket, 401, "UNAUTHORIZED", "Account is no longer active");
+        return;
+      }
       let row: Awaited<ReturnType<typeof svc.resolveRunningHandle>>["row"];
       try {
         // requireOwned semantics (404 for non-owners) + running check in one call.
-        const resolved = await svc.resolveRunningHandle(containerId, claims.userId, claims.role === "admin");
+        const resolved = await svc.resolveRunningHandle(containerId, claims.userId, user.role === "admin");
         row = resolved.row;
       } catch (err) {
         const status = (err as { status?: number }).status ?? 500;
@@ -209,8 +219,8 @@ export function attachPtyServer(server: HttpServer, deps: PtyServerDeps): { clos
 
     // Input budgets: keystrokes are tiny; sustained high-volume input is
     // paste-flooding at best and memory/CPU abuse at worst.
-    const INPUT_BYTES_PER_SECOND = 256 * 1024;
-    const INPUT_BYTES_TOTAL = 100 * 1024 * 1024;
+    const INPUT_BYTES_PER_SECOND = cfg.pty.inputBytesPerSecond;
+    const INPUT_BYTES_TOTAL = cfg.pty.inputBytesTotal;
     let inputWindowStart = 0;
     let inputWindowBytes = 0;
     const inputAllowed = (n: number): boolean => {

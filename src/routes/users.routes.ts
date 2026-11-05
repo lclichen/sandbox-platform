@@ -149,6 +149,15 @@ export function usersRouter(): Router {
       for (const row of rows) {
         try {
           if (!row.username || !row.password) throw new Error("missing username or password");
+          // The CSV path bypassed the zod schema used by POST /admin/users;
+          // enforce the same identifier/email/length bounds per row.
+          if (!/^[a-zA-Z0-9_.-]{2,64}$/.test(row.username)) {
+            throw new Error("username must be 2-64 chars (letters, digits, _ . -)");
+          }
+          if (row.password.length > 256) throw new Error("password exceeds 256 chars");
+          if (row.email && !z.string().email().safeParse(row.email).success) {
+            throw new Error("invalid email");
+          }
           const violation = validatePasswordPolicy(row.password);
           if (violation) throw new Error(violation);
           await users.create({
@@ -223,6 +232,20 @@ export function usersRouter(): Router {
         }
       }
       const user = await users.update(id, body);
+      // A role or status CHANGE is a credential-boundary event: invalidate the
+      // target's outstanding access tokens (tv claim) and refresh tokens so a
+      // demoted/disabled account cannot keep acting on an old session. Compare
+      // with the pre-update row — a PATCH that echoes the unchanged role/status
+      // (common full-object form submissions) must NOT log the user out.
+      const roleChanged = body.role !== undefined && body.role !== target.role;
+      const statusChanged = body.status !== undefined && body.status !== target.status;
+      if (roleChanged || statusChanged) {
+        await db.run("UPDATE users SET token_version = token_version + 1 WHERE id = ?", id);
+        await db.run(
+          "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
+          id,
+        );
+      }
       res.json(toPublic(user));
     })().catch(next);
   });

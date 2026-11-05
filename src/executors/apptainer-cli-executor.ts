@@ -24,7 +24,9 @@ import type {
 } from "./types.ts";
 import { loadConfig } from "../config.ts";
 import { logger } from "../utils/logger.ts";
+import { HttpError } from "../utils/errors.ts";
 import { isValidEnvName } from "./shell-quote.ts";
+import { safeProcessEnvForHost } from "./safe-env.ts";
 
 /** apptainer's phrasings when `instance stop` targets an unknown instance —
  *  that is a successful stop for our purposes (idempotent end state). */
@@ -367,16 +369,35 @@ export class ApptainerCliExecutor implements SandboxExecutor {
 
   /** Run a command and capture stdout as raw BYTES (utf8 decoding would
    *  corrupt archives/binary payloads — used by workspace export). */
-  async execBuffer(handle: ContainerHandle, command: string): Promise<Buffer> {
+  async execBuffer(handle: ContainerHandle, command: string, opts: { maxBytes?: number } = {}): Promise<Buffer> {
     const args = ["exec", "--pwd", "/workspace", `instance://${handle.id}`, "sh", "-c", command];
     return new Promise<Buffer>((resolve, reject) => {
       const child = spawn(this.bin, args, { windowsHide: true });
       const chunks: Buffer[] = [];
+      let received = 0;
       let stderr = "";
-      child.stdout.on("data", (d: Buffer) => chunks.push(d));
-      child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
+      let tooLarge = false;
+      const max = opts.maxBytes && opts.maxBytes > 0 ? opts.maxBytes : undefined;
+      child.stdout.on("data", (d: Buffer) => {
+        if (tooLarge) return;
+        received += d.byteLength;
+        if (max !== undefined && received > max) {
+          tooLarge = true;
+          chunks.length = 0;
+          child.kill("SIGKILL");
+          return;
+        }
+        chunks.push(d);
+      });
+      child.stderr.on("data", (d: Buffer) => {
+        if (stderr.length < 2000) stderr += d.toString("utf8");
+      });
       child.on("error", reject);
       child.on("close", (code) => {
+        if (tooLarge) {
+          reject(new HttpError(413, "FILE_TOO_LARGE", `execBuffer output exceeds the ${max}-byte limit`));
+          return;
+        }
         if (code === 0) resolve(Buffer.concat(chunks));
         else reject(new Error(`execBuffer failed (exit ${code}): ${stderr.trim().slice(0, 300)}`));
       });
@@ -401,7 +422,11 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       cols: opts.cols > 0 ? opts.cols : 80,
       rows: opts.rows > 0 ? opts.rows : 24,
       cwd: "/tmp",
-      env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
+      // SECURITY: never spread the platform process env into a user shell.
+      // The PTY runs inside the container, but the HOST-side `apptainer`
+      // process inherits this env; JWT_SECRET / DB / SSH credentials used to
+      // be readable via `env` in the terminal.
+      env: { ...safeProcessEnvForHost(), TERM: "xterm-256color" },
     });
     let exited = false;
     return {
@@ -482,6 +507,30 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
+      let outputTruncated = false;
+      let outputBytes = 0;
+      const maxOutput = opts.maxOutputBytes && opts.maxOutputBytes > 0 ? opts.maxOutputBytes : undefined;
+      const collect = (target: Buffer[], d: Buffer): void => {
+        if (maxOutput === undefined) {
+          target.push(d);
+          opts.onData?.(d);
+          return;
+        }
+        const remaining = maxOutput - outputBytes;
+        if (remaining <= 0) {
+          outputTruncated = true;
+          child.kill("SIGKILL");
+          return;
+        }
+        const accepted = d.byteLength > remaining ? d.subarray(0, remaining) : d;
+        target.push(accepted);
+        outputBytes += accepted.byteLength;
+        if (accepted.byteLength > 0) opts.onData?.(accepted);
+        if (accepted.byteLength < d.byteLength) {
+          outputTruncated = true;
+          child.kill("SIGKILL");
+        }
+      };
       const timer =
         opts.timeout && opts.timeout > 0
           ? setTimeout(() => {
@@ -489,14 +538,8 @@ export class ApptainerCliExecutor implements SandboxExecutor {
               child.kill("SIGKILL");
             }, opts.timeout * 1000)
           : undefined;
-      child.stdout.on("data", (d: Buffer) => {
-        stdoutChunks.push(d);
-        opts.onData?.(d);
-      });
-      child.stderr.on("data", (d: Buffer) => {
-        stderrChunks.push(d);
-        opts.onData?.(d);
-      });
+      child.stdout.on("data", (d: Buffer) => collect(stdoutChunks, d));
+      child.stderr.on("data", (d: Buffer) => collect(stderrChunks, d));
       const onAbort = () => child.kill("SIGKILL");
       opts.signal?.addEventListener("abort", onAbort, { once: true });
       child.on("error", (err) => {
@@ -512,6 +555,7 @@ export class ApptainerCliExecutor implements SandboxExecutor {
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: Buffer.concat(stderrChunks).toString("utf8"),
           timedOut,
+          outputTruncated,
         };
         // Non-zero exit is a normal ExecResult; only throw for spawn errors (handled above).
         resolveFn(result);

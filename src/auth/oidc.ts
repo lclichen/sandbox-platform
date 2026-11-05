@@ -49,6 +49,24 @@ export function oidcEnabled(): boolean {
   return cfg.enabled && Boolean(cfg.issuerUrl && cfg.clientId);
 }
 
+/**
+ * OIDC discovery/JWKS/token endpoints carry the trust anchor for every login.
+ * HTTP (no TLS) lets a network attacker swap the discovery document and serve
+ * their own JWKS, forging arbitrary users. HTTPS is required unless the admin
+ * explicitly opts into an isolated test network.
+ */
+function assertSecureEndpoint(url: string, label: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`OIDC ${label} 不是合法 URL`);
+  }
+  if (parsed.protocol === "https:") return;
+  if (parsed.protocol === "http:" && loadConfig().oidc.allowInsecureHttp) return;
+  throw new Error(`OIDC ${label} 必须使用 HTTPS（如确需明文 HTTP，设置 OIDC_ALLOW_INSECURE_HTTP=true）`);
+}
+
 export async function discoverEndpoints(): Promise<OidcEndpoints> {
   const cfg = loadConfig().oidc;
   const explicit: OidcEndpoints = {
@@ -58,6 +76,10 @@ export async function discoverEndpoints(): Promise<OidcEndpoints> {
     jwks_uri: cfg.jwksUri ?? "",
   };
   if (explicit.authorization_endpoint && explicit.token_endpoint && explicit.jwks_uri) {
+    assertSecureEndpoint(explicit.issuer, "issuer");
+    assertSecureEndpoint(explicit.authorization_endpoint, "authorization_endpoint");
+    assertSecureEndpoint(explicit.token_endpoint, "token_endpoint");
+    assertSecureEndpoint(explicit.jwks_uri, "jwks_uri");
     return explicit; // 显式覆盖：不做发现
   }
   const cached = discoveryCache.get(cfg.issuerUrl);
@@ -78,6 +100,10 @@ export async function discoverEndpoints(): Promise<OidcEndpoints> {
   if (!merged.authorization_endpoint || !merged.token_endpoint || !merged.jwks_uri) {
     throw new Error("OIDC 发现文档缺少 authorization_endpoint/token_endpoint/jwks_uri");
   }
+  assertSecureEndpoint(merged.issuer, "issuer");
+  assertSecureEndpoint(merged.authorization_endpoint, "authorization_endpoint");
+  assertSecureEndpoint(merged.token_endpoint, "token_endpoint");
+  assertSecureEndpoint(merged.jwks_uri, "jwks_uri");
   discoveryCache.set(cfg.issuerUrl, { value: merged, fetchedAt: Date.now() });
   return merged;
 }
@@ -246,7 +272,13 @@ export async function verifyIdToken(idToken: string, expectedNonce: string): Pro
   if (payload.iss !== endpoints.issuer) throw new Error(`id_token issuer 不符（${String(payload.iss)}）`);
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   if (!aud.includes(cfg.clientId)) throw new Error("id_token audience 不符");
+  // OIDC Core 3.1.3.7: when aud has multiple values, azp MUST identify this
+  // client. Without it a token minted for another client that shares an
+  // audience value could be replayed here.
+  if (aud.length > 1 && payload.azp !== cfg.clientId) throw new Error("id_token azp 不符");
   if (typeof payload.exp !== "number" || payload.exp < now - 30) throw new Error("id_token 已过期");
+  if (typeof payload.nbf === "number" && payload.nbf > now + 60) throw new Error("id_token 尚未生效");
+  if (typeof payload.iat === "number" && payload.iat > now + 60) throw new Error("id_token 签发时间异常");
   if (payload.nonce !== expectedNonce) throw new Error("id_token nonce 不符（可能重放）");
   if (typeof payload.sub !== "string" || payload.sub.length === 0) throw new Error("id_token 缺少 sub");
 

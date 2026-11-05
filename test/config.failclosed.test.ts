@@ -98,7 +98,10 @@ describe("fail-closed configuration", () => {
       await executor.isAvailable();
       const handle = await executor.create({
         id: "sb-envtest",
-        imageRef: { sifPath: join(tmp, "img.sif") },
+        imagePath: join(tmp, "img.sif"),
+        cpu: 1,
+        memoryMb: 128,
+        diskGb: 1,
         overlayPath: join(tmp, "ovl"),
         env: { CONTAINER_VAR: "visible" },
       });
