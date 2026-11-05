@@ -101,9 +101,9 @@ critical）、`nanoid@5.0.9`、`zod@3.24.1`；dev 链有 `tinypool` critical。
 - 新增 `test/limits.config.test.ts`（2 项）：限流/上限的默认值与环境变量覆盖
   （与 `docs/LIMITS.md` 对齐）。
 - `npx tsc --noEmit`：0 错误。
-- `npx vitest run`：**265 passed / 8 failed**。8 个失败与改造前基线完全一致：
-  5 个 `extension-client.smoke`（依赖 127.0.0.1:3000 外部服务）、
-  2 个 `api-key.smoke`（同上）、1 个已下线的 `web/dist` SPA 静态页测试。
+- `npx vitest run`：**265 passed / 7 failed**。7 个失败与改造前基线一致：
+  5 个 `extension-client.smoke`（依赖 127.0.0.1:3000 外部服务）+
+  2 个 `api-key.smoke`（同上）。已下线的 `web/dist` SPA 静态页测试已删除。
   本次未新增失败。
 
 ## 4. 残余风险 / 部署建议

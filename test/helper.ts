@@ -46,10 +46,12 @@ export async function setupTestApp(): Promise<TestContext> {
   const prevWsBase = process.env.WORKSPACE_BASE_DIR;
   process.env.WORKSPACE_BASE_DIR = join(tmpDir, "ws");
   // Tests hammer login/register endpoints; rate limiting is covered by its
-  // own dedicated test file with explicit configuration (which sets
-  // RATE_LIMIT_ENABLED itself before calling us — respect that).
-  const injectedRateLimit = process.env.RATE_LIMIT_ENABLED === undefined;
-  if (injectedRateLimit) process.env.RATE_LIMIT_ENABLED = "false";
+  // own dedicated test file with explicit configuration. A `.env` with
+  // RATE_LIMIT_ENABLED=true must NOT leak into every test, so the dedicated
+  // file opts in with RATE_LIMIT_TEST_OPT_IN=true.
+  const rateLimitOptIn = process.env.RATE_LIMIT_TEST_OPT_IN === "true";
+  const prevRateLimitEnabled = process.env.RATE_LIMIT_ENABLED;
+  if (!rateLimitOptIn) process.env.RATE_LIMIT_ENABLED = "false";
   // A non-default seed password: seeding with the well-known default now puts
   // the admin behind the R9 must-change-password gate (login → 403).
   const prevSeedPw = process.env.SEED_ADMIN_PASSWORD;
@@ -75,7 +77,10 @@ export async function setupTestApp(): Promise<TestContext> {
     restoreWsBase: () => {
       if (prevWsBase === undefined) delete process.env.WORKSPACE_BASE_DIR;
       else process.env.WORKSPACE_BASE_DIR = prevWsBase;
-      if (injectedRateLimit) delete process.env.RATE_LIMIT_ENABLED;
+      if (!rateLimitOptIn) {
+        if (prevRateLimitEnabled === undefined) delete process.env.RATE_LIMIT_ENABLED;
+        else process.env.RATE_LIMIT_ENABLED = prevRateLimitEnabled;
+      }
       if (prevSeedPw === undefined) delete process.env.SEED_ADMIN_PASSWORD;
       else process.env.SEED_ADMIN_PASSWORD = prevSeedPw;
       resetConfigForTesting();

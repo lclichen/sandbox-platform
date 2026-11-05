@@ -87,6 +87,7 @@ describe("R1 self-registration", () => {
 
     it("rate-limits registration when enabled", async () => {
       // Separate app with the limiter on and a 2/min cap.
+      process.env.RATE_LIMIT_TEST_OPT_IN = "true";
       process.env.RATE_LIMIT_ENABLED = "true";
       process.env.RATE_LIMIT_REGISTER_PER_MINUTE = "2";
       resetConfigForTesting();
@@ -106,6 +107,7 @@ describe("R1 self-registration", () => {
         expect(blocked.status).toBe(429);
       } finally {
         await teardownTestApp(ctx2);
+        delete process.env.RATE_LIMIT_TEST_OPT_IN;
         delete process.env.RATE_LIMIT_ENABLED;
         delete process.env.RATE_LIMIT_REGISTER_PER_MINUTE;
         resetConfigForTesting();

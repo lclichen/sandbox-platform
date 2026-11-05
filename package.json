@@ -1,6 +1,6 @@
 {
   "name": "sandbox-platform",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Centralized Apptainer-based cloud-native sandbox management platform",
   "type": "module",
   "license": "MIT",

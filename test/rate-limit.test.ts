@@ -13,6 +13,7 @@ describe("rate limiting", () => {
   let ctx: TestContext;
 
   beforeEach(async () => {
+    process.env.RATE_LIMIT_TEST_OPT_IN = "true";
     process.env.RATE_LIMIT_ENABLED = "true";
     process.env.RATE_LIMIT_LOGIN_PER_MINUTE = "3";
     resetConfigForTesting();
@@ -21,6 +22,7 @@ describe("rate limiting", () => {
 
   afterEach(async () => {
     await teardownTestApp(ctx);
+    delete process.env.RATE_LIMIT_TEST_OPT_IN;
     delete process.env.RATE_LIMIT_ENABLED;
     delete process.env.RATE_LIMIT_LOGIN_PER_MINUTE;
     resetConfigForTesting();
@@ -75,16 +77,7 @@ describe("security headers", () => {
     expect(res.headers["x-powered-by"]).toBeUndefined();
   });
 
-  it("serves the built SPA without violating its own CSP", async () => {
-    const html = await ctx.request().get("/");
-    expect(html.status).toBe(200);
-    expect(html.headers["content-security-policy"]).toContain("default-src 'self'");
-    // A hashed JS asset referenced by the SPA must be same-origin-loadable.
-    const asset = String(html.text.match(/src="([^"]+\.js)"/)?.[1] ?? "").replace(/^\.\//, "");
-    if (asset) {
-      const js = await ctx.request().get(asset.startsWith("/") ? asset : `/${asset}`);
-      expect(js.status).toBe(200);
-      expect(js.headers["content-security-policy"]).toContain("default-src 'self'");
-    }
-  });
+  // The "web/dist SPA CSP" test was removed: the legacy admin SPA was retired
+  // when the management UI moved to pi-web. The API-only server returns 404 for
+  // "/" when no build exists, so the old assertion was environment-dependent.
 });
