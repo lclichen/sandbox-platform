@@ -19,7 +19,8 @@ critical）、`nanoid@5.0.9`、`zod@3.24.1`；dev 链有 `tinypool` critical。
 | nanoid | 5.0.9 → 5.1.16 | 多个 DoS/整数溢出 advisory |
 | express-rate-limit | 7 → 8 | 与 Express 5 配套 |
 | vitest | 2.1.8 → 4.1.12 | `@vitest/mocker` / `tinypool` critical |
-| pg / node-ssh / jsonwebtoken / dotenv / pino | 补丁/小版本 | 常规维护 |
+| pg / node-ssh / dotenv / pino | 补丁/小版本 | 常规维护 |
+| jsonwebtoken → jose | 9.0.3 → 6.2.15 | 零依赖（MIT）；移除 jsonwebtoken 带来的 8 个 `lodash.*` 包（含被扫描器误报为 lodash 4.3.0 的 lodash.includes@4.3.0） |
 | safe-regex2 | 新增 | grep 用户正则的 ReDoS 预检 |
 
 注意：`npm install` 需要 `--legacy-peer-deps`（npm 10.9 + vitest 4 peer 解析
@@ -100,6 +101,10 @@ critical）、`nanoid@5.0.9`、`zod@3.24.1`；dev 链有 `tinypool` critical。
   角色降权、登录枚举、并发 refresh、符号链接写逃逸、分块上传总上限、env 掩码。
 - 新增 `test/limits.config.test.ts`（2 项）：限流/上限的默认值与环境变量覆盖
   （与 `docs/LIMITS.md` 对齐）。
+- `lodash.includes@4.3.0` 是 jsonwebtoken 的传递依赖，不是 lodash 核心 4.3.0；
+  OSV 对 `lodash.includes@4.3.0` 无 advisory，`npm audit` 也是 0。为消除扫描器
+  误报，已用零依赖的 `jose` 替换 jsonwebtoken，锁文件中不再有任何 `lodash*`
+  或 `jsonwebtoken`。旧 token（数字 `sub`）仍可验证。
 - `npx tsc --noEmit`：0 错误。
 - `npx vitest run`：**265 passed / 7 failed**。7 个失败与改造前基线一致：
   5 个 `extension-client.smoke`（依赖 127.0.0.1:3000 外部服务）+

@@ -56,7 +56,7 @@ export function createAuthService(db: Database) {
 
   async function issueTokenPair(user: UserRow, clientIp?: string, familyId?: string): Promise<TokenPair> {
     const jti = generateJti();
-    const refreshToken = signRefreshToken(user.id, jti);
+    const refreshToken = await signRefreshToken(user.id, jti);
     const expiresAt = decodeExpiry(refreshToken);
     // Every login starts a NEW family; rotations during refresh keep the same
     // family so a detected replay can revoke everything at once (P1-3).
@@ -71,7 +71,7 @@ export function createAuthService(db: Database) {
       family,
     );
     return {
-      accessToken: signAccessToken({
+      accessToken: await signAccessToken({
         id: user.id,
         username: user.username,
         role: user.role,
@@ -119,7 +119,7 @@ export function createAuthService(db: Database) {
     async refresh(refreshToken: string, clientIp?: string): Promise<TokenPair> {
       let claims: RefreshClaims;
       try {
-        claims = verifyToken<RefreshClaims>(refreshToken);
+        claims = await verifyToken<RefreshClaims>(refreshToken);
       } catch {
         throw new UnauthorizedError("Invalid refresh token");
       }

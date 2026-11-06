@@ -60,7 +60,7 @@ export async function authenticateCredential(
     if (isApiKeyFormat(credential)) {
       return await claimsFromApiKey(db, credential);
     }
-    const claims = verifyToken<AccessClaims>(credential);
+    const claims = await verifyToken<AccessClaims>(credential);
     if (claims.type !== "access") return null;
     // Non-HTTP consumers (PTY upgrades, future relays) must see the SAME live
     // user state as requireAuth — a signed JWT alone is a point-in-time
@@ -116,7 +116,7 @@ export function requireAuth(): RequestHandler {
         if (!claims) return next(new UnauthorizedError("Invalid or revoked API key"));
       } else {
         try {
-          claims = verifyToken<AccessClaims>(credential);
+          claims = await verifyToken<AccessClaims>(credential);
         } catch {
           return next(new UnauthorizedError("Invalid or expired token"));
         }
