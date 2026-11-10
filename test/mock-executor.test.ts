@@ -149,9 +149,15 @@ describe("MockExecutor lifecycle", () => {
     expect(res.exitCode).toBe(0);
     expect(res.stdout).toContain("notes.txt");
 
-    // Host-style absolute paths are still rejected (they would escape).
-    const hostAbs = process.platform === "win32" ? "C:\\Windows\\win.ini" : "/etc/passwd";
-    await expect(exec.readFile(handle, hostAbs)).rejects.toThrow(/escapes the sandbox root/);
+    // POSIX absolute paths are container paths (/etc is the container's /etc);
+    // win32 drive-absolute paths are host paths and must be rejected.
+    if (process.platform === "win32") {
+      await expect(exec.readFile(handle, "C:\\Windows\\win.ini")).rejects.toThrow(/escapes the sandbox root/);
+    } else {
+      await exec.writeFile(handle, "/etc/passwd", Buffer.from("sandbox-passwd"));
+      const data = await exec.readFile(handle, "/etc/passwd");
+      expect(data.toString("utf8")).toBe("sandbox-passwd");
+    }
     await exec.destroy(handle);
   });
 

@@ -237,11 +237,27 @@ export class MockExecutor implements SandboxExecutor {
     const handleEnv = handle.env ?? stored?.env;
     const mergedEnv = { ...safeProcessEnvForMock(), ...(handleEnv ?? {}), ...(opts.env ?? {}) };
     return new Promise((resolveFn) => {
+      const detached = process.platform !== "win32";
       const child = spawn(shell, shellArgs, {
         cwd,
         env: mergedEnv,
         windowsHide: true,
+        // A POSIX shell's children (sleep, pipelines) inherit the stdout
+        // pipes: killing only the shell leaves `close` waiting for them.
+        // Put the command in its own process group and kill the whole group.
+        detached,
       });
+      const killTree = (): void => {
+        if (detached && child.pid) {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+            return;
+          } catch {
+            // Group already gone: fall through to the direct kill.
+          }
+        }
+        child.kill("SIGKILL");
+      };
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
@@ -257,7 +273,7 @@ export class MockExecutor implements SandboxExecutor {
         const remaining = maxOutput - outputBytes;
         if (remaining <= 0) {
           outputTruncated = true;
-          child.kill("SIGKILL");
+          killTree();
           return;
         }
         const accepted = d.byteLength > remaining ? d.subarray(0, remaining) : d;
@@ -266,20 +282,20 @@ export class MockExecutor implements SandboxExecutor {
         if (accepted.byteLength > 0) opts.onData?.(accepted);
         if (accepted.byteLength < d.byteLength) {
           outputTruncated = true;
-          child.kill("SIGKILL");
+          killTree();
         }
       };
       const timer =
         opts.timeout && opts.timeout > 0
           ? setTimeout(() => {
               timedOut = true;
-              child.kill("SIGKILL");
+              killTree();
             }, opts.timeout * 1000)
           : undefined;
 
       child.stdout.on("data", (d: Buffer) => collect(stdoutChunks, d));
       child.stderr.on("data", (d: Buffer) => collect(stderrChunks, d));
-      const onAbort = () => child.kill("SIGKILL");
+      const onAbort = () => killTree();
       opts.signal?.addEventListener("abort", onAbort, { once: true });
 
       child.on("error", (err) => {
