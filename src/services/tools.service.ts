@@ -9,7 +9,8 @@
  * satisfies them via its own shell.
  */
 import type { Database } from "../db/driver.ts";
-import type { SandboxExecutor, ContainerHandle } from "../executors/types.ts";
+import type { SandboxExecutor, ContainerHandle, ManifestResult } from "../executors/types.ts";
+import { MANIFEST_MAX_ENTRIES } from "../executors/manifest.ts";
 import { createContainerService } from "./container.service.ts";
 import { truncate } from "../utils/truncate.ts";
 import { HttpError } from "../utils/errors.ts";
@@ -157,6 +158,61 @@ export function createToolsService(db: Database, executor: SandboxExecutor) {
         }
       }
       return entries;
+    },
+
+    async manifest(cid: number, userId: number, roots: string[]): Promise<ManifestResult> {
+      const { handle } = await resolve(cid, userId);
+      if (executor.manifest) return executor.manifest(handle, roots);
+
+      // Fallback for executors without the batched primitive: walk with the
+      // portable readdir/stat pair. Slower, but the caller (projection) still
+      // avoids one HTTP round trip per file.
+      const entries: ManifestResult["entries"] = [];
+      let truncated = false;
+      const walk = async (dir: string, relDir: string, depth: number): Promise<void> => {
+        if (truncated) return;
+        let names: string[];
+        try {
+          names = await executor.readdir(handle, dir);
+        } catch {
+          return;
+        }
+        for (const name of names) {
+          if (truncated) return;
+          if (name === ".git" || (name === ".cache" && relDir.endsWith("node_modules"))) continue;
+          const child = `${dir.replace(/\/$/, "")}/${name}`;
+          const rel = relDir ? `${relDir}/${name}` : name;
+          try {
+            const s = await executor.stat(handle, child);
+            if (s.isDirectory) {
+              if (depth + 1 <= limits.walkMaxDepth) await walk(child, rel, depth + 1);
+            } else if (s.isFile) {
+              if (entries.length >= MANIFEST_MAX_ENTRIES) {
+                truncated = true;
+                return;
+              }
+              entries.push({ path: rel, size: s.size, mtimeMs: s.mtimeMs });
+            }
+          } catch {
+            // Unreadable child: the listing is incomplete, so callers must not
+            // treat missing paths as deleted.
+            truncated = true;
+            return;
+          }
+        }
+      };
+      for (const root of roots) {
+        const normalized = root.replace(/\/+$/, "") || "/";
+        try {
+          const s = await executor.stat(handle, normalized);
+          if (s.isDirectory) await walk(normalized, normalized, 0);
+          else if (s.isFile) entries.push({ path: normalized, size: s.size, mtimeMs: s.mtimeMs });
+        } catch {
+          // Missing root contributes no files.
+        }
+        if (truncated) break;
+      }
+      return { entries, truncated };
     },
 
     async bash(

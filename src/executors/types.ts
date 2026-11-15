@@ -107,6 +107,19 @@ export interface FileStat {
   mtimeMs: number;
 }
 
+/** One regular file in a batched directory manifest. Paths are container-relative. */
+export interface ManifestEntry {
+  path: string;
+  size: number;
+  mtimeMs: number;
+}
+
+/** `truncated` means the list is incomplete and must not drive deletions. */
+export interface ManifestResult {
+  entries: ManifestEntry[];
+  truncated: boolean;
+}
+
 export interface ExecOptions {
   cwd?: string;
   timeout?: number; // seconds
@@ -186,6 +199,9 @@ export interface SandboxExecutor {
   access(handle: ContainerHandle, path: string): Promise<void>;
   readdir(handle: ContainerHandle, path: string): Promise<string[]>;
   stat(handle: ContainerHandle, path: string): Promise<FileStat>;
+  /** Batched stat-only listing for several roots (projection fast path).
+   *  Optional: callers must fall back to readdir/stat when absent. */
+  manifest?(handle: ContainerHandle, roots: string[]): Promise<ManifestResult>;
   exec(handle: ContainerHandle, command: string, opts?: ExecOptions): Promise<ExecResult>;
   /** Binary-safe exec (stdout as raw Buffer). Optional: executors that only
    *  produce utf8 output (SSH) may omit it; callers must fall back or reject. */

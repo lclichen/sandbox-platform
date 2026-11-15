@@ -18,6 +18,7 @@ import type {
   SnapshotHandle,
   CreateRequest,
   FileStat,
+  ManifestResult,
   ExecOptions,
   ExecResult,
   PtyOptions,
@@ -203,6 +204,54 @@ export class MockExecutor implements SandboxExecutor {
       size: s.size,
       mtimeMs: s.mtimeMs,
     };
+  }
+
+  async manifest(handle: ContainerHandle, roots: string[]): Promise<ManifestResult> {
+    const entries: ManifestResult["entries"] = [];
+    let truncated = false;
+    const normalizeRoot = (root: string): string =>
+      root.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+
+    const walk = async (absDir: string, relDir: string): Promise<void> => {
+      const dirents = await readdir(absDir, { withFileTypes: true });
+      for (const dirent of dirents) {
+        if (truncated) return;
+        if (dirent.isSymbolicLink()) continue;
+        const rel = relDir ? `${relDir}/${dirent.name}` : dirent.name;
+        if (dirent.isDirectory()) {
+          if (dirent.name === ".git") continue;
+          if (dirent.name === ".cache" && relDir.endsWith("node_modules")) continue;
+          await walk(join(absDir, dirent.name), rel);
+          continue;
+        }
+        if (!dirent.isFile()) continue;
+        const s = await stat(join(absDir, dirent.name));
+        if (entries.length >= 10_000) {
+          truncated = true;
+          return;
+        }
+        entries.push({ path: rel, size: s.size, mtimeMs: s.mtimeMs });
+      }
+    };
+
+    for (const rawRoot of roots) {
+      const rootRel = normalizeRoot(rawRoot);
+      if (!rootRel || rootRel === ".") continue;
+      const abs = this.resolveIn(handle, rootRel);
+      let s;
+      try {
+        s = await stat(abs);
+      } catch {
+        continue; // missing root contributes no files
+      }
+      if (s.isDirectory()) {
+        await walk(abs, rootRel);
+      } else if (s.isFile()) {
+        entries.push({ path: rootRel, size: s.size, mtimeMs: s.mtimeMs });
+      }
+      if (truncated) break;
+    }
+    return { entries, truncated };
   }
 
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {

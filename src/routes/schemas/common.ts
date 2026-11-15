@@ -170,6 +170,10 @@ export const readToolSchema = z.object({
   path: z.string().min(1).max(4096),
 });
 
+export const manifestToolSchema = z.object({
+  roots: z.array(z.string().min(1).max(4096)).min(1).max(16),
+});
+
 export const writeToolSchema = z.object({
   path: z.string().min(1).max(4096),
   content: z.string().min(1), // base64

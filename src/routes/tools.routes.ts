@@ -10,6 +10,7 @@
  *   GET  /access?path=                              -> { exists }
  *   GET  /stat?path=                                -> { isDirectory, isFile, size, mtimeMs }
  *   GET  /ls?path=                                   -> { entries: [{name,...}] }
+ *   POST /manifest   { roots: string[] }             -> { entries: [{path,size,mtimeMs}], truncated }
  *   POST /bash       { command, cwd?, timeout?, env? } -> { stdout, stderr, exitCode, timedOut, truncated }
  *   POST /bash/stream  { command, cwd?, timeout? }    -> SSE event stream of bash output
  *   POST /grep       { pattern, path?, ... }        -> { output }
@@ -25,6 +26,7 @@ import {
   readToolSchema,
   writeToolSchema,
   editToolSchema,
+  manifestToolSchema,
   bashToolSchema,
   grepToolSchema,
   findToolSchema,
@@ -95,6 +97,17 @@ export function toolsRouter(): Router {
     createToolsService(getDb(req), getExecutorFromReq(req))
       .ls(id, currentUserId(req), path)
       .then((entries) => res.json({ entries }))
+      .catch(next);
+  });
+
+  // Batched stat-only listing for workspace projection (one round trip instead
+  // of one /stat per file). `truncated` means the caller must fall back.
+  router.post("/:id/tools/manifest", (req, res, next) => {
+    const { id } = validate(idParamSchema, req.params);
+    const { roots } = validate(manifestToolSchema, req.body);
+    createToolsService(getDb(req), getExecutorFromReq(req))
+      .manifest(id, currentUserId(req), roots)
+      .then((result) => res.json(result))
       .catch(next);
   });
 

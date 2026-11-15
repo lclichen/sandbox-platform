@@ -122,6 +122,52 @@ describe("container tools", () => {
     expect(stat.body.size).toBe(1);
   });
 
+  it("manifest lists regular files for several roots and skips repo/cache noise", async () => {
+    ctx = await setupTestApp();
+    const token = await createUserAndLogin(ctx, "tooluser-manifest");
+    const cid = await newContainer(ctx, token, "manifest-box");
+    const files: Record<string, string> = {
+      "/workspace/.pi/skills/demo/SKILL.md": "# demo",
+      "/workspace/.pi/skills/demo/scripts/run.sh": "echo hi",
+      "/workspace/.pi/skills/demo/.git/config": "noise",
+      "/workspace/.pi/skills/demo/node_modules/.cache/a.js": "noise",
+      "/workspace/.pi/attachments/pic.bin": "binary",
+    };
+    for (const [path, content] of Object.entries(files)) {
+      const res = await ctx
+        .request()
+        .post(`/api/v1/containers/${cid}/tools/write`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ path, content: b64(content) });
+      expect(res.status).toBe(200);
+    }
+
+    const manifest = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/manifest`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ roots: ["/workspace/.pi/skills", "/workspace/.pi/attachments", "/workspace/.pi/missing"] });
+    expect(manifest.status).toBe(200);
+    expect(manifest.body.truncated).toBe(false);
+    const paths = manifest.body.entries.map((e: { path: string }) => e.path).sort();
+    expect(paths).toEqual([
+      "/workspace/.pi/attachments/pic.bin",
+      "/workspace/.pi/skills/demo/SKILL.md",
+      "/workspace/.pi/skills/demo/scripts/run.sh",
+    ]);
+    for (const entry of manifest.body.entries as Array<{ size: number; mtimeMs: number }>) {
+      expect(entry.size).toBeGreaterThan(0);
+      expect(entry.mtimeMs).toBeGreaterThan(0);
+    }
+
+    const bad = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/tools/manifest`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ roots: [] });
+    expect(bad.status).toBe(400);
+  });
+
   it("edit applies an exact text replacement", async () => {
     ctx = await setupTestApp();
     const token = await createUserAndLogin(ctx, "tooluser5");

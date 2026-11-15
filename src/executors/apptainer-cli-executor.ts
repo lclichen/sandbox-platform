@@ -17,6 +17,7 @@ import type {
   SnapshotHandle,
   CreateRequest,
   FileStat,
+  ManifestResult,
   ExecOptions,
   ExecResult,
   PtyOptions,
@@ -27,6 +28,7 @@ import { logger } from "../utils/logger.ts";
 import { HttpError } from "../utils/errors.ts";
 import { isValidEnvName } from "./shell-quote.ts";
 import { safeProcessEnvForHost } from "./safe-env.ts";
+import { manifestShellScript, parseManifestOutput } from "./manifest.ts";
 
 /** apptainer's phrasings when `instance stop` targets an unknown instance —
  *  that is a successful stop for our purposes (idempotent end state). */
@@ -354,6 +356,17 @@ export class ApptainerCliExecutor implements SandboxExecutor {
       size: Number(size) || 0,
       mtimeMs: Number(mtime) * 1000 || 0,
     };
+  }
+
+  async manifest(handle: ContainerHandle, roots: string[]): Promise<ManifestResult> {
+    const r = await this.exec(handle, manifestShellScript(roots), {
+      timeout: 30,
+      maxOutputBytes: 4 * 1024 * 1024,
+    });
+    if (r.exitCode !== 0 && !r.stdout.trim()) {
+      throw new Error(`manifest failed: ${r.stderr.trim().slice(0, 300) || `exit ${r.exitCode}`}`);
+    }
+    return parseManifestOutput(r.stdout, r.outputTruncated === true || r.exitCode !== 0);
   }
 
   async exec(handle: ContainerHandle, command: string, opts: ExecOptions = {}): Promise<ExecResult> {
