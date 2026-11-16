@@ -2,7 +2,7 @@
  * Milestone 2 E2E: auth flow, RBAC, and admin CRUD for users/quotas/images.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { setupTestApp, teardownTestApp, adminToken, type TestContext } from "./helper.ts";
+import { setupTestApp, teardownTestApp, adminToken, createUserAndLogin, type TestContext } from "./helper.ts";
 
 let ctx: TestContext | undefined;
 
@@ -241,6 +241,122 @@ describe("admin images CRUD", () => {
     expect(patch.body.display_name).toBe("Rust 1.80 (updated)");
 
     const del = await ctx.request().delete(`/api/v1/admin/images/${create.body.id}`).set("Authorization", `Bearer ${token}`);
+    expect(del.status).toBe(204);
+  });
+});
+
+describe("image deletion with container/snapshot history", () => {
+  async function makeImage(ctx: TestContext, token: string, name: string): Promise<number> {
+    const res = await ctx
+      .request()
+      .post("/api/v1/admin/images")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ name, display_name: name, sif_path: `/srv/${name}.sif`, is_public: true });
+    expect(res.status).toBe(201);
+    return res.body.id as number;
+  }
+
+  async function makeContainer(
+    ctx: TestContext,
+    token: string,
+    imageId: number,
+    name: string,
+  ): Promise<number> {
+    const res = await ctx
+      .request()
+      .post("/api/v1/containers")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ imageId, name, cpu: 1, memoryMb: 512, diskGb: 2 });
+    expect(res.status).toBe(201);
+    return res.body.id as number;
+  }
+
+  it("deletes an image after its only containers are destroyed", async () => {
+    ctx = await setupTestApp();
+    const admin = await adminToken(ctx);
+    const user = await createUserAndLogin(ctx, "image-history");
+    const imageId = await makeImage(ctx, admin, "history-image");
+    const cid = await makeContainer(ctx, user, imageId, "history-box");
+
+    // A container that can still launch blocks deletion.
+    const blocked = await ctx
+      .request()
+      .delete(`/api/v1/admin/images/${imageId}`)
+      .set("Authorization", `Bearer ${admin}`);
+    expect(blocked.status).toBe(409);
+    expect(String(blocked.body.message)).toMatch(/container/);
+
+    const destroy = await ctx
+      .request()
+      .delete(`/api/v1/containers/${cid}`)
+      .set("Authorization", `Bearer ${user}`);
+    expect(destroy.status).toBe(204);
+
+    const del = await ctx
+      .request()
+      .delete(`/api/v1/admin/images/${imageId}`)
+      .set("Authorization", `Bearer ${admin}`);
+    expect(del.status).toBe(204);
+
+    // Hidden from the catalogue, but the destroyed container row and its
+    // image reference remain for history.
+    const list = await ctx.request().get("/api/v1/admin/images").set("Authorization", `Bearer ${admin}`);
+    expect(list.status).toBe(200);
+    expect(list.body.images.some((image: { id: number }) => image.id === imageId)).toBe(false);
+    const detail = await ctx
+      .request()
+      .get(`/api/v1/containers/${cid}`)
+      .set("Authorization", `Bearer ${user}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.status).toBe("destroyed");
+
+    // New containers cannot launch from a deleted image.
+    const recreate = await ctx
+      .request()
+      .post("/api/v1/containers")
+      .set("Authorization", `Bearer ${user}`)
+      .send({ imageId, name: "history-box-2", cpu: 1, memoryMb: 512, diskGb: 2 });
+    expect(recreate.status).toBe(404);
+  });
+
+  it("blocks image deletion while a snapshot references it", async () => {
+    ctx = await setupTestApp();
+    const admin = await adminToken(ctx);
+    const user = await createUserAndLogin(ctx, "snapshot-history");
+    const imageId = await makeImage(ctx, admin, "snapshot-image");
+    const cid = await makeContainer(ctx, user, imageId, "snapshot-box");
+
+    const snap = await ctx
+      .request()
+      .post(`/api/v1/containers/${cid}/snapshots`)
+      .set("Authorization", `Bearer ${user}`)
+      .send({ name: "keep-me" });
+    expect(snap.status).toBe(201);
+    const snapId = snap.body.id as number;
+
+    const destroy = await ctx
+      .request()
+      .delete(`/api/v1/containers/${cid}`)
+      .set("Authorization", `Bearer ${user}`);
+    expect(destroy.status).toBe(204);
+
+    const blocked = await ctx
+      .request()
+      .delete(`/api/v1/admin/images/${imageId}`)
+      .set("Authorization", `Bearer ${admin}`);
+    expect(blocked.status).toBe(409);
+    expect(String(blocked.body.message)).toMatch(/snapshot/);
+
+    const dropSnap = await ctx
+      .request()
+      .delete(`/api/v1/containers/${cid}/snapshots/${snapId}`)
+      .set("Authorization", `Bearer ${user}`);
+    expect(dropSnap.status).toBe(204);
+
+    const del = await ctx
+      .request()
+      .delete(`/api/v1/admin/images/${imageId}`)
+      .set("Authorization", `Bearer ${admin}`);
     expect(del.status).toBe(204);
   });
 });

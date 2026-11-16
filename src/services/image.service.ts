@@ -47,6 +47,9 @@ export interface ImageRow {
   max_per_user: number | null;
   created_at: string;
   updated_at: string;
+  /** Soft-delete tombstone: hidden from the catalogue, kept for container and
+   *  snapshot history. Only set once no live container/snapshot references it. */
+  deleted_at: string | null;
 }
 
 export interface ImageInput {
@@ -74,7 +77,7 @@ export function createImageService(db: Database) {
   return {
     async getById(id: number): Promise<ImageRow | null> {
       const raw = await db.get<Omit<ImageRow, "tags" | "default_resources" | "is_public"> & Record<string, unknown>>(
-        "SELECT * FROM images WHERE id = ?",
+        "SELECT * FROM images WHERE id = ? AND deleted_at IS NULL",
         id,
       );
       return raw ? decode(raw, db.dialect) : null;
@@ -88,7 +91,7 @@ export function createImageService(db: Database) {
 
     async list(): Promise<ImageRow[]> {
       const rows = await db.all<Omit<ImageRow, "tags" | "default_resources" | "is_public"> & Record<string, unknown>>(
-        "SELECT * FROM images ORDER BY id",
+        "SELECT * FROM images WHERE deleted_at IS NULL ORDER BY id",
       );
       return rows.map((r) => decode(r, db.dialect));
     },
@@ -157,11 +160,27 @@ export function createImageService(db: Database) {
     },
 
     async delete(id: number): Promise<void> {
-      const inUse = await db.get<{ c: number }>("SELECT COUNT(*) AS c FROM containers WHERE image_id = ?", id);
-      if (Number(inUse?.c ?? 0) > 0) {
-        throw new ConflictError("Image is referenced by containers; remove them first");
+      await this.requireById(id);
+      // Destroyed containers and snapshots keep their image_id for history.
+      // Only sessions that can still launch (or be restored) block deletion.
+      const live = await db.get<{ c: number }>(
+        "SELECT COUNT(*) AS c FROM containers WHERE image_id = ? AND status <> 'destroyed'",
+        id,
+      );
+      if (Number(live?.c ?? 0) > 0) {
+        throw new ConflictError(`Image is used by ${live!.c} container(s); destroy them first`);
       }
-      await db.run("DELETE FROM images WHERE id = ?", id);
+      const snaps = await db.get<{ c: number }>("SELECT COUNT(*) AS c FROM snapshots WHERE image_id = ?", id);
+      if (Number(snaps?.c ?? 0) > 0) {
+        throw new ConflictError(`Image is used by ${snaps!.c} snapshot(s); delete them first`);
+      }
+      // Soft delete: keeps destroyed-container/snapshot history intact without
+      // a SQLite FK rebuild. The catalogue and create/update paths treat it as
+      // gone; the row stays for the historical joins.
+      await db.run(
+        "UPDATE images SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL",
+        id,
+      );
     },
   };
 }

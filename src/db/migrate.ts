@@ -30,6 +30,7 @@ const migrationModules: Array<{ id: string; module: string }> = [
   { id: "0002_token_version", module: "./migrations/0002_token_version.ts" },
   { id: "0003_oidc_identity", module: "./migrations/0003_oidc_identity.ts" },
   { id: "0004_container_mounts", module: "./migrations/0004_container_mounts.ts" },
+  { id: "0005_image_soft_delete", module: "./migrations/0005_image_soft_delete.ts" },
 ];
 
 /** The former incremental chain — kept only to recognize already-migrated
