@@ -13,6 +13,9 @@ vi.hoisted(() => {
   process.env.OIDC_ISSUER_URL = "https://idp.test";
   process.env.OIDC_CLIENT_ID = "pi-web-client";
   process.env.OIDC_CLIENT_SECRET = "pi-web-secret";
+  // The browser-facing callback must not depend on the Host header used by the
+  // test client (localhost); the IdP client registers this public URL.
+  process.env.OIDC_PUBLIC_BASE_URL = "https://platform.test";
 });
 import { setupTestApp, teardownTestApp, type TestContext } from "./helper.ts";
 
@@ -185,6 +188,9 @@ describe("oidc routes & provisioning", () => {
     const location = new URL(res.headers.location);
     expect(location.origin + location.pathname).toBe("https://idp.test/authorize");
     expect(location.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(location.searchParams.get("redirect_uri")).toBe(
+      "https://platform.test/api/v1/auth/oidc/callback",
+    );
     const setCookie = res.headers["set-cookie"] as unknown as string | string[];
     const cookieHeader = Array.isArray(setCookie) ? setCookie[0] : setCookie;
     expect(cookieHeader).toContain("oidc_flow=");

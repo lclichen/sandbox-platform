@@ -34,6 +34,25 @@ function optional(name: string): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Optional absolute http(s) base URL (no credentials/query/hash), with trailing
+ * slashes stripped. Invalid values are ignored with a warning instead of
+ * failing startup — the caller falls back to the request Host.
+ */
+function optionalHttpBaseUrl(name: string): string | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("not http(s)");
+    if (url.username || url.password || url.search || url.hash) throw new Error("credentials/query/hash");
+    return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    console.warn(`[config] ignoring invalid ${name}: ${value}`);
+    return undefined;
+  }
+}
+
 function int(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
@@ -116,6 +135,12 @@ export interface AppConfig {
     authorizationEndpoint: string | undefined;
     tokenEndpoint: string | undefined;
     jwksUri: string | undefined;
+    /**
+     * 平台对外基础地址（如 https://platform.example.com）。
+     * IdP 的 redirect_uri 固定为 `<publicBaseUrl>/api/v1/auth/oidc/callback`；
+     * 不填则按发起请求的 Host 推断（反代/浏览器走内网地址时必须显式设置）。
+     */
+    publicBaseUrl: string | undefined;
     /** 允许回跳的 pi-web 地址前缀（OIDC_ALLOWED_REDIRECTS，逗号分隔）。 */
     allowedRedirectPrefixes: string[];
     /** 显式允许明文 HTTP OIDC 端点（默认拒绝；仅限隔离内网测试）。 */
@@ -302,6 +327,7 @@ export function loadConfig(): AppConfig {
       authorizationEndpoint: optional("OIDC_AUTHORIZATION_ENDPOINT"),
       tokenEndpoint: optional("OIDC_TOKEN_ENDPOINT"),
       jwksUri: optional("OIDC_JWKS_URI"),
+      publicBaseUrl: optionalHttpBaseUrl("OIDC_PUBLIC_BASE_URL"),
       allowedRedirectPrefixes: (required("OIDC_ALLOWED_REDIRECTS", ""))
         .split(",").map((x) => x.trim()).filter(Boolean),
       allowInsecureHttp: bool("OIDC_ALLOW_INSECURE_HTTP", false),

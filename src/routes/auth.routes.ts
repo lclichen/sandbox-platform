@@ -62,6 +62,17 @@ export function isAllowedOidcRedirect(redirectUri: string, prefixes: string[]): 
   });
 }
 
+/**
+ * The redirect_uri sent to the IdP, shared by begin and token exchange.
+ * Prefer the operator-configured public base URL: the browser may reach the
+ * platform through localhost/0.0.0.0 (pi-web's internal server address), which
+ * would otherwise leak into the IdP registration and the client-callback hop.
+ */
+function oidcCallbackUrl(req: { protocol: string; get(name: string): string | undefined }): string {
+  const base = loadConfig().oidc.publicBaseUrl ?? `${req.protocol}://${req.get("host") ?? "localhost"}`;
+  return `${base.replace(/\/+$/, "")}/api/v1/auth/oidc/callback`;
+}
+
 export function authRouter(): Router {
   const router = Router();
 
@@ -108,7 +119,7 @@ export function authRouter(): Router {
       const endpoints = await discoverEndpoints();
       const { verifier, challenge } = createPkcePair();
       const nonce = createNonce();
-      const platformCallback = `${req.protocol}://${req.get("host")}/api/v1/auth/oidc/callback`;
+      const platformCallback = oidcCallbackUrl(req);
       const state = encodeFlowState({ verifier, nonce, redirectUri, exp: Date.now() + 10 * 60_000 });
       const authorizeUrl = buildAuthorizeUrl(endpoints, {
         clientId: cfg.oidc.clientId,
@@ -150,7 +161,7 @@ export function authRouter(): Router {
       }
       res.clearCookie(oidcFlowCookieName, { path: "/api/v1/auth/oidc" });
       const endpoints = await discoverEndpoints();
-      const platformCallback = `${req.protocol}://${req.get("host")}/api/v1/auth/oidc/callback`;
+      const platformCallback = oidcCallbackUrl(req);
       const { idToken } = await exchangeCodeForTokens(endpoints, {
         clientId: cfg.oidc.clientId,
         clientSecret: cfg.oidc.clientSecret,

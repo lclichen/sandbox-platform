@@ -17,11 +17,18 @@ OIDC_SCOPES=openid profile email                 # 默认即此，一般不用�
 OIDC_AUTHORIZATION_ENDPOINT=...                  # 无发现文档的 IdP 逐项覆盖（三 个都填才跳过发现）
 OIDC_TOKEN_ENDPOINT=...
 OIDC_JWKS_URI=...
+OIDC_PUBLIC_BASE_URL=https://platform.example.com
+                                                 # 平台对外地址；IdP 回调固定为
+                                                 # <该地址>/api/v1/auth/oidc/callback。
+                                                 # 不填则按请求 Host 推断。
 OIDC_ALLOWED_REDIRECTS=http://piweb1.local/api/webauth/oidc/callback,http://piweb2.local/...
                                                  # 回跳白名单（前缀匹配）；不配则放行任意 http(s) 来源
 ```
 
-IdP 侧登记回调地址：`<平台对外地址>/api/v1/auth/oidc/callback`。
+IdP 侧登记回调地址：`${OIDC_PUBLIC_BASE_URL}/api/v1/auth/oidc/callback`（未配置
+`OIDC_PUBLIC_BASE_URL` 时按浏览器访问平台时的 Host 推断）。**浏览器经
+localhost/0.0.0.0 或反向代理访问平台时必须显式配置**，否则平台会把该内部地址
+作为 `redirect_uri` 发给 IdP，导致 IdP 校验失败或回跳到错误主机。
 
 ## 2. 与 REGISTER_MODE 的关系
 
